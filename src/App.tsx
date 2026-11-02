@@ -360,9 +360,14 @@ export default function App() {
 
         <div className="p-4 border-t border-slate-200 dark:border-slate-800">
           <div className="px-3 py-2.5 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800">
-            <p className="text-xs font-bold text-slate-800 dark:text-slate-200 truncate">
-              {settings.business_name || 'Usaha WiFi Anda'}
-            </p>
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-xs font-bold text-slate-800 dark:text-slate-200 truncate">
+                {settings.business_name || 'Usaha WiFi Anda'}
+              </p>
+              <span className="font-mono text-[10px] font-bold px-1.5 py-0.5 rounded bg-blue-50 dark:bg-blue-950/70 text-blue-600 dark:text-blue-400 border border-blue-200/70 dark:border-blue-800/70 shrink-0">
+                v1.2.0
+              </span>
+            </div>
             <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate mt-0.5">
               {customers.filter((c) => c.status === 'active').length} pelanggan aktif
             </p>

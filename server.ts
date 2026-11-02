@@ -2,6 +2,8 @@ import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import fs from 'fs';
 import path from 'path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { fileURLToPath } from 'url';
 import {
   executeMikrotikControlAction,
@@ -11,12 +13,15 @@ import {
   testMikrotikConnection,
 } from './server/mikrotikClient.js';
 
+const execFileAsync = promisify(execFile);
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const DATA_DIR = path.join(__dirname, 'data');
 const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
 const DB_FILE = path.join(DATA_DIR, 'db.json');
+const VERSION_FILE = path.join(__dirname, 'version.json');
 
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -98,6 +103,8 @@ interface AppSettings {
   mikrotik_user?: string;
   mikrotik_password?: string;
   mikrotik_protocol?: 'api' | 'api-ssl' | 'rest-http' | 'rest-https';
+  github_repo_url?: string;
+  github_branch?: string;
 }
 
 interface DatabaseSchema {
@@ -201,6 +208,8 @@ function createDefaultSettings(ownerId: string): AppSettings {
     mikrotik_user: 'admin',
     mikrotik_password: '',
     mikrotik_protocol: 'api',
+    github_repo_url: '',
+    github_branch: 'main',
   };
 }
 
@@ -276,6 +285,15 @@ function normalizeQueueTargetIp(targetStr: string | undefined): string {
 async function startServer() {
   const app = express();
   const PORT = 3000;
+
+  // Hardened HTTP Security Headers against XSS, MIME-sniffing, and Clickjacking
+  app.disable('x-powered-by');
+  app.use((_req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    res.setHeader('Permissions-Policy', 'geolocation=(), microphone=(), camera=()');
+    next();
+  });
 
   app.use(express.json({ limit: '10mb' }));
   app.use('/uploads', express.static(UPLOADS_DIR));
@@ -363,6 +381,8 @@ async function startServer() {
           ? String(body.mikrotik_password)
           : (prev.mikrotik_password ?? ''),
       mikrotik_protocol: body.mikrotik_protocol || prev.mikrotik_protocol || 'api',
+      github_repo_url: String(body.github_repo_url ?? prev.github_repo_url ?? '').trim(),
+      github_branch: String(body.github_branch ?? prev.github_branch ?? 'main').trim() || 'main',
     };
     db.app_settings[ownerId] = updated;
     saveDb(db);
@@ -372,7 +392,8 @@ async function startServer() {
   // Restore Full Data Backup (.XLSX)
   app.post('/api/restore', requireOwner, (req, res) => {
     const ownerId = (req as any).ownerId as string;
-    const { mode, customers, payments, expenses, packages } = req.body;
+    const { mode, customers, payments, expenses } = req.body;
+    const packages = req.body.wifi_packages || req.body.packages;
     const db = loadDb();
     ensureOwnerInitialized(db, ownerId);
 
@@ -514,15 +535,23 @@ async function startServer() {
     }
 
     saveDb(db);
+    const ownerCustomers = db.customers.filter((c) => c.ownerId === ownerId);
+    const ownerPayments = db.payments.filter((p) => p.ownerId === ownerId);
+    const ownerExpenses = db.expenses.filter((e) => e.ownerId === ownerId);
+    const ownerPackages = db.wifi_packages.filter((p) => p.ownerId === ownerId);
     res.json({
       restoredCustomers,
       restoredPayments,
       restoredExpenses,
       restoredPackages,
-      customers: db.customers.filter((c) => c.ownerId === ownerId),
-      payments: db.payments.filter((p) => p.ownerId === ownerId),
-      expenses: db.expenses.filter((e) => e.ownerId === ownerId),
-      wifi_packages: db.wifi_packages.filter((p) => p.ownerId === ownerId),
+      customersCount: ownerCustomers.length,
+      paymentsCount: ownerPayments.length,
+      expensesCount: ownerExpenses.length,
+      packagesCount: ownerPackages.length,
+      customers: ownerCustomers,
+      payments: ownerPayments,
+      expenses: ownerExpenses,
+      wifi_packages: ownerPackages,
     });
   });
 
@@ -1086,12 +1115,15 @@ async function startServer() {
       const routerHealth = {
         identity: snap.identity || 'MikroTik Router',
         boardName: snap.resource['board-name'] || snap.resource.platform || 'RouterOS',
+        board_name: snap.resource['board-name'] || snap.resource.platform || 'RouterOS',
         version: snap.resource.version || '-',
         uptime: snap.resource.uptime || '-',
         cpuLoad: Number(snap.resource['cpu-load'] || 0),
+        cpu_load: Number(snap.resource['cpu-load'] || 0),
         freeMemory,
         totalMemory,
         memoryUsagePercent,
+        memory_used_percent: memoryUsagePercent,
       };
 
       // Build lookup maps from MikroTik data
@@ -1327,10 +1359,20 @@ async function startServer() {
         });
       });
 
+      const onlineCount = monitorItems.filter((i) => i.onlineStatus === 'online').length;
+      const isolatedCount = monitorItems.filter((i) => i.onlineStatus === 'isolated').length;
+      const offlineCount = monitorItems.length - onlineCount - isolatedCount;
+
       res.json({
         connected: true,
         timestamp: new Date().toISOString(),
         router: routerHealth,
+        summary: {
+          total: monitorItems.length,
+          online: onlineCount,
+          offline: offlineCount,
+          isolated: isolatedCount,
+        },
         items: monitorItems,
       });
     } catch (err: any) {
@@ -1361,6 +1403,370 @@ async function startServer() {
     } catch (err: any) {
       res.status(400).json({
         error: err?.message || 'Gagal mengeksekusi perintah ke MikroTik.',
+      });
+    }
+  });
+
+  // ============================================================================
+  // SYSTEM VERSIONING & GITHUB AUTO-UPDATER (ANTI-RCE HARDENED)
+  // ============================================================================
+
+  function readLocalVersionFile(): {
+    version: string;
+    releaseDate: string;
+    channel: string;
+    changelog: string[];
+  } {
+    try {
+      if (fs.existsSync(VERSION_FILE)) {
+        const parsed = JSON.parse(fs.readFileSync(VERSION_FILE, 'utf-8'));
+        return {
+          version: String(parsed.version || '1.2.0'),
+          releaseDate: String(parsed.releaseDate || '2026-11-02'),
+          channel: String(parsed.channel || 'stable'),
+          changelog: Array.isArray(parsed.changelog) ? parsed.changelog.map(String) : [],
+        };
+      }
+    } catch {
+      // fallback
+    }
+    return {
+      version: '1.2.0',
+      releaseDate: '2026-11-02',
+      channel: 'stable',
+      changelog: [],
+    };
+  }
+
+  function compareSemver(vA: string, vB: string): number {
+    const cleanA = String(vA || '0.0.0').replace(/^v/i, '').split('.').map((n) => parseInt(n, 10) || 0);
+    const cleanB = String(vB || '0.0.0').replace(/^v/i, '').split('.').map((n) => parseInt(n, 10) || 0);
+    for (let i = 0; i < 3; i++) {
+      const a = cleanA[i] || 0;
+      const b = cleanB[i] || 0;
+      if (a > b) return 1;
+      if (a < b) return -1;
+    }
+    return 0;
+  }
+
+  // Strict Anti-RCE validator: only allow official https://github.com/<owner>/<repo> URLs
+  function validateGitHubRepoAndBranch(repoUrlRaw: string, branchRaw: string): {
+    owner: string;
+    repo: string;
+    cleanRepoUrl: string;
+    branch: string;
+  } {
+    const urlStr = String(repoUrlRaw || '').trim();
+    const branchStr = String(branchRaw || 'main').trim() || 'main';
+
+    const repoMatch = urlStr.match(
+      /^https:\/\/github\.com\/([a-zA-Z0-9_.-]{1,100})\/([a-zA-Z0-9_.-]{1,100}?)(?:\.git|\/)?$/
+    );
+    if (!repoMatch) {
+      throw new Error(
+        'URL Repositori tidak valid. Demi keamanan (Anti-RCE), wajib menggunakan format HTTPS resmi: https://github.com/username/nama-repo'
+      );
+    }
+
+    // Disallow leading hyphen or shell metacharacters in branch name to prevent Git option injection
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9_./-]{0,62}$/.test(branchStr) || branchStr.includes('..')) {
+      throw new Error(
+        'Nama branch tidak valid. Gunakan karakter alfanumerik standar (contoh: main, master, v1.2).'
+      );
+    }
+
+    const owner = repoMatch[1];
+    const repo = repoMatch[2];
+    return {
+      owner,
+      repo,
+      cleanRepoUrl: `https://github.com/${owner}/${repo}.git`,
+      branch: branchStr,
+    };
+  }
+
+  async function runGitSafe(args: string[], timeoutMs = 25000): Promise<string> {
+    const { stdout } = await execFileAsync('git', args, {
+      cwd: __dirname,
+      timeout: timeoutMs,
+      windowsHide: true,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+    });
+    return String(stdout || '').trim();
+  }
+
+  async function getLocalGitStatus() {
+    const gitDir = path.join(__dirname, '.git');
+    if (!fs.existsSync(gitDir)) {
+      return {
+        initialized: false,
+        commitHash: '-',
+        commitDate: '-',
+        commitMessage: 'Belum terhubung ke Git lokal',
+        branch: 'main',
+        remoteUrl: '',
+      };
+    }
+    try {
+      const commitHash = await runGitSafe(['rev-parse', '--short', 'HEAD']).catch(() => '-');
+      const commitDate = await runGitSafe(['log', '-1', '--format=%ci']).catch(() => '-');
+      const commitMessage = await runGitSafe(['log', '-1', '--format=%s']).catch(() => '-');
+      const branch = await runGitSafe(['branch', '--show-current']).catch(() => 'main');
+      const remoteUrl = await runGitSafe(['remote', 'get-url', 'origin']).catch(() => '');
+      return {
+        initialized: true,
+        commitHash: commitHash || '-',
+        commitDate: commitDate ? commitDate.slice(0, 19) : '-',
+        commitMessage: commitMessage || '-',
+        branch: branch || 'main',
+        remoteUrl: remoteUrl || '',
+      };
+    } catch {
+      return {
+        initialized: false,
+        commitHash: '-',
+        commitDate: '-',
+        commitMessage: '-',
+        branch: 'main',
+        remoteUrl: '',
+      };
+    }
+  }
+
+  app.get('/api/system/version', requireOwner, async (_req, res) => {
+    const localVer = readLocalVersionFile();
+    const gitInfo = await getLocalGitStatus();
+    res.json({
+      version: localVer.version,
+      releaseDate: localVer.releaseDate,
+      channel: localVer.channel,
+      nodeVersion: process.version,
+      changelog: localVer.changelog,
+      git: gitInfo,
+    });
+  });
+
+  app.post('/api/system/github-check', requireOwner, async (req, res) => {
+    const ownerId = (req as any).ownerId as string;
+    const db = loadDb();
+    ensureOwnerInitialized(db, ownerId);
+
+    try {
+      const { owner, repo, cleanRepoUrl, branch } = validateGitHubRepoAndBranch(
+        req.body?.repoUrl || db.app_settings[ownerId].github_repo_url || '',
+        req.body?.branch || db.app_settings[ownerId].github_branch || 'main'
+      );
+
+      // Persist validated repoUrl and branch in settings
+      db.app_settings[ownerId].github_repo_url = cleanRepoUrl;
+      db.app_settings[ownerId].github_branch = branch;
+      saveDb(db);
+
+      const localVer = readLocalVersionFile();
+      let remoteVersion = localVer.version;
+      let remoteReleaseDate = '-';
+      let remoteChangelog: string[] = [];
+      let recentCommits: string[] = [];
+      let behindCommits = 0;
+
+      // 1. Fetch remote version.json or package.json via GitHub HTTPS raw API
+      const rawVersionUrl = `https://raw.githubusercontent.com/${owner}/${repo}/${encodeURIComponent(
+        branch
+      )}/version.json`;
+      const rawRes = await fetch(rawVersionUrl, {
+        headers: { 'User-Agent': 'Simple-Billing-Mini-ISP-Updater/1.2' },
+        signal: AbortSignal.timeout(10000),
+      });
+
+      if (rawRes.ok) {
+        const remoteVerData: any = await rawRes.json();
+        if (remoteVerData?.version) {
+          remoteVersion = String(remoteVerData.version).trim();
+        }
+        if (remoteVerData?.releaseDate) {
+          remoteReleaseDate = String(remoteVerData.releaseDate).trim();
+        }
+        if (Array.isArray(remoteVerData?.changelog)) {
+          remoteChangelog = remoteVerData.changelog.map(String);
+        }
+      } else {
+        // Fallback: check package.json on GitHub branch
+        const pkgUrl = `https://raw.githubusercontent.com/${owner}/${repo}/${encodeURIComponent(
+          branch
+        )}/package.json`;
+        const pkgRes = await fetch(pkgUrl, {
+          headers: { 'User-Agent': 'Simple-Billing-Mini-ISP-Updater/1.2' },
+          signal: AbortSignal.timeout(10000),
+        });
+        if (!pkgRes.ok) {
+          throw new Error(
+            `Repositori atau branch "${branch}" tidak ditemukan atau bersifat privat di GitHub (${pkgRes.status}).`
+          );
+        }
+        const pkgData: any = await pkgRes.json();
+        if (pkgData?.version && pkgData.version !== '0.0.0') {
+          remoteVersion = String(pkgData.version).trim();
+        }
+      }
+
+      // 2. Fetch latest commits from GitHub REST API for transparent changelog preview
+      const commitsApiUrl = `https://api.github.com/repos/${owner}/${repo}/commits?sha=${encodeURIComponent(
+        branch
+      )}&per_page=5`;
+      const commitsRes = await fetch(commitsApiUrl, {
+        headers: {
+          Accept: 'application/vnd.github+json',
+          'User-Agent': 'Simple-Billing-Mini-ISP-Updater/1.2',
+        },
+        signal: AbortSignal.timeout(10000),
+      }).catch(() => null);
+
+      if (commitsRes && commitsRes.ok) {
+        const commitsList: any = await commitsRes.json();
+        if (Array.isArray(commitsList)) {
+          recentCommits = commitsList.map((c: any) => {
+            const sha = String(c?.sha || '').slice(0, 7);
+            const msg = String(c?.commit?.message || '').split('\n')[0];
+            const date = String(c?.commit?.committer?.date || '').slice(0, 10);
+            return `[${sha}] ${msg} (${date})`;
+          });
+        }
+      }
+
+      // 3. Also check git commit distance if local .git is initialized
+      const gitDir = path.join(__dirname, '.git');
+      if (fs.existsSync(gitDir)) {
+        try {
+          const currentRemote = await runGitSafe(['remote', 'get-url', 'origin']).catch(() => '');
+          if (!currentRemote) {
+            await runGitSafe(['remote', 'add', 'origin', cleanRepoUrl]);
+          } else if (currentRemote !== cleanRepoUrl) {
+            await runGitSafe(['remote', 'set-url', 'origin', cleanRepoUrl]);
+          }
+          await runGitSafe(['fetch', 'origin', branch], 20000);
+          const countStr = await runGitSafe([
+            'rev-list',
+            `HEAD..origin/${branch}`,
+            '--count',
+          ]).catch(() => '0');
+          behindCommits = parseInt(countStr, 10) || 0;
+        } catch {
+          // ignore git fetch error if git not configured yet
+        }
+      }
+
+      const semverCmp = compareSemver(remoteVersion, localVer.version);
+      const isNewerVersion = semverCmp > 0;
+      const updateAvailable = isNewerVersion || behindCommits > 0;
+
+      res.json({
+        checkedAt: new Date().toISOString(),
+        repoUrl: cleanRepoUrl,
+        branch,
+        localVersion: localVer.version,
+        remoteVersion,
+        updateAvailable,
+        isNewerVersion,
+        behindCommits,
+        remoteReleaseDate,
+        remoteChangelog,
+        recentCommits,
+        message: isNewerVersion
+          ? `Tersedia versi baru v${remoteVersion} di GitHub (versi Anda saat ini v${localVer.version}).`
+          : behindCommits > 0
+          ? `Tersedia ${behindCommits} pembaruan commit baru pada branch ${branch}.`
+          : `Aplikasi Anda sudah menggunakan versi terbaru (v${localVer.version}).`,
+      });
+    } catch (err: any) {
+      res.status(400).json({
+        error: err?.message || 'Gagal memeriksa pembaruan dari GitHub.',
+      });
+    }
+  });
+
+  app.post('/api/system/github-update', requireOwner, async (req, res) => {
+    const ownerId = (req as any).ownerId as string;
+    const db = loadDb();
+    ensureOwnerInitialized(db, ownerId);
+
+    try {
+      const { cleanRepoUrl, branch } = validateGitHubRepoAndBranch(
+        req.body?.repoUrl || db.app_settings[ownerId].github_repo_url || '',
+        req.body?.branch || db.app_settings[ownerId].github_branch || 'main'
+      );
+
+      db.app_settings[ownerId].github_repo_url = cleanRepoUrl;
+      db.app_settings[ownerId].github_branch = branch;
+      saveDb(db);
+
+      const previousVersion = readLocalVersionFile().version;
+      const logs: string[] = [];
+      logs.push(`[INFO] Memulai proses update aman (Anti-RCE) dari ${cleanRepoUrl} (branch: ${branch})`);
+      logs.push(`[INFO] Folder database (/data/db.json & /data/uploads) dilindungi dan tidak akan disentuh.`);
+
+      const gitDir = path.join(__dirname, '.git');
+      if (!fs.existsSync(gitDir)) {
+        logs.push(`[GIT] Menginisialisasi repositori Git lokal...`);
+        await runGitSafe(['init']);
+        await runGitSafe(['remote', 'add', 'origin', cleanRepoUrl]);
+      } else {
+        const currentRemote = await runGitSafe(['remote', 'get-url', 'origin']).catch(() => '');
+        if (!currentRemote) {
+          await runGitSafe(['remote', 'add', 'origin', cleanRepoUrl]);
+        } else if (currentRemote !== cleanRepoUrl) {
+          await runGitSafe(['remote', 'set-url', 'origin', cleanRepoUrl]);
+        }
+      }
+
+      logs.push(`[GIT] Mengunduh pembaruan dari origin/${branch}...`);
+      await runGitSafe(['fetch', 'origin', branch], 45000);
+
+      logs.push(`[GIT] Menerapkan kode versi terbaru (git reset --hard origin/${branch})...`);
+      const resetOut = await runGitSafe(['reset', '--hard', `origin/${branch}`], 30000);
+      if (resetOut) logs.push(`[GIT] ${resetOut}`);
+
+      // Install dependencies safely without shell execution
+      logs.push(`[NPM] Memeriksa dan memperbarui paket dependensi...`);
+      try {
+        const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+        await execFileAsync(npmCmd, ['install', '--no-audit', '--no-fund'], {
+          cwd: __dirname,
+          timeout: 120000,
+          windowsHide: true,
+        });
+        logs.push(`[NPM] Dependensi berhasil disinkronkan.`);
+
+        if (process.env.NODE_ENV === 'production') {
+          logs.push(`[BUILD] Membangun ulang aset produksi (npm run build)...`);
+          await execFileAsync(npmCmd, ['run', 'build'], {
+            cwd: __dirname,
+            timeout: 120000,
+            windowsHide: true,
+          });
+          logs.push(`[BUILD] Build produksi selesai.`);
+        }
+      } catch (npmErr: any) {
+        logs.push(`[WARN] Peringatan instalasi paket: ${npmErr?.message || 'lewatkan'}`);
+      }
+
+      const newVerInfo = readLocalVersionFile();
+      const newGit = await getLocalGitStatus();
+      logs.push(
+        `[SELESAI] Aplikasi berhasil diperbarui ke versi v${newVerInfo.version} (Commit: ${newGit.commitHash}).`
+      );
+
+      res.json({
+        success: true,
+        previousVersion,
+        newVersion: newVerInfo.version,
+        commitHash: newGit.commitHash,
+        logs,
+        message: `Aplikasi berhasil diperbarui dari v${previousVersion} ke v${newVerInfo.version}!`,
+      });
+    } catch (err: any) {
+      res.status(400).json({
+        error: err?.message || 'Gagal menjalankan update dari GitHub.',
       });
     }
   });

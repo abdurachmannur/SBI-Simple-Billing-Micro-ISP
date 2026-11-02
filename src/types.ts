@@ -112,17 +112,62 @@ export interface AppSettings {
   mikrotik_user?: string;
   mikrotik_password?: string;
   mikrotik_protocol?: MikrotikProtocol;
+  github_repo_url?: string;
+  github_branch?: string;
+}
+
+export interface AppVersionInfo {
+  version: string;
+  releaseDate: string;
+  channel: string;
+  nodeVersion: string;
+  changelog: string[];
+  git: {
+    initialized: boolean;
+    commitHash: string;
+    commitDate: string;
+    commitMessage: string;
+    branch: string;
+    remoteUrl: string;
+  };
+}
+
+export interface GitHubUpdateCheckResponse {
+  checkedAt: string;
+  repoUrl: string;
+  branch: string;
+  localVersion: string;
+  remoteVersion: string;
+  updateAvailable: boolean;
+  isNewerVersion: boolean;
+  behindCommits: number;
+  remoteReleaseDate: string;
+  remoteChangelog: string[];
+  recentCommits: string[];
+  message: string;
+}
+
+export interface GitHubUpdateExecuteResponse {
+  success: boolean;
+  previousVersion: string;
+  newVersion: string;
+  commitHash: string;
+  logs: string[];
+  message: string;
 }
 
 export interface MikrotikRouterHealth {
   identity: string;
   boardName: string;
+  board_name?: string;
   version: string;
   uptime: string;
   cpuLoad: number;
+  cpu_load?: number;
   freeMemory: number;
   totalMemory: number;
   memoryUsagePercent: number;
+  memory_used_percent?: number;
 }
 
 export interface MikrotikCustomerMonitorItem {
@@ -155,6 +200,12 @@ export interface MikrotikMonitorResponse {
   connected: boolean;
   timestamp: string;
   router: MikrotikRouterHealth;
+  summary?: {
+    total: number;
+    online: number;
+    offline: number;
+    isolated: number;
+  };
   items: MikrotikCustomerMonitorItem[];
 }
 

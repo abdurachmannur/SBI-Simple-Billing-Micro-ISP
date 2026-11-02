@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Save,
   Upload,
@@ -13,8 +13,20 @@ import {
   CheckCircle2,
   AlertCircle,
   RefreshCw,
+  GitBranch,
+  ShieldCheck,
+  ArrowUpCircle,
+  Terminal,
 } from 'lucide-react';
-import { AppSettings, Customer, Expense, Payment, WifiPackage } from '../types';
+import {
+  AppSettings,
+  AppVersionInfo,
+  Customer,
+  Expense,
+  GitHubUpdateCheckResponse,
+  Payment,
+  WifiPackage,
+} from '../types';
 import { exportFullBackupToXlsx, parseFullBackupXlsx } from '../utils';
 import { api } from '../api';
 import { ConfirmDialog, Modal } from './Modal';
@@ -76,14 +88,26 @@ export function SettingsView({
   const [mikrotikPort, setMikrotikPort] = useState<number>(settings.mikrotik_port || 8728);
   const [mikrotikUser, setMikrotikUser] = useState(settings.mikrotik_user || 'admin');
   const [mikrotikPassword, setMikrotikPassword] = useState(settings.mikrotik_password || '');
-  const [mikrotikProtocol, setMikrotikProtocol] = useState<'api' | 'api-ssl' | 'rest-http' | 'rest-https'>(
-    settings.mikrotik_protocol || 'api'
-  );
+  const [mikrotikProtocol, setMikrotikProtocol] = useState<
+    'api' | 'api-ssl' | 'rest-http' | 'rest-https'
+  >(settings.mikrotik_protocol || 'api');
   const [isTestingMikrotik, setIsTestingMikrotik] = useState(false);
   const [mikrotikTestResult, setMikrotikTestResult] = useState<{
     ok: boolean;
     message: string;
   } | null>(null);
+
+  // GitHub Version & Auto-Update State
+  const [githubRepoUrl, setGithubRepoUrl] = useState(settings.github_repo_url || '');
+  const [githubBranch, setGithubBranch] = useState(settings.github_branch || 'main');
+  const [versionInfo, setVersionInfo] = useState<AppVersionInfo | null>(null);
+  const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
+  const [updateCheckResult, setUpdateCheckResult] = useState<GitHubUpdateCheckResponse | null>(
+    null
+  );
+  const [isConfirmUpdateOpen, setIsConfirmUpdateOpen] = useState(false);
+  const [isExecutingUpdate, setIsExecutingUpdate] = useState(false);
+  const [updateLogs, setUpdateLogs] = useState<string[]>([]);
 
   // Restore Backup (.XLSX) State
   const restoreInputRef = useRef<HTMLInputElement | null>(null);
@@ -104,6 +128,22 @@ export function SettingsView({
 
   const logoInputRef = useRef<HTMLInputElement | null>(null);
 
+  const fetchVersionStatus = useCallback(async () => {
+    try {
+      const info = await api.getSystemVersion(ownerId);
+      setVersionInfo(info);
+      if (!githubRepoUrl && info.git.remoteUrl) {
+        setGithubRepoUrl(info.git.remoteUrl);
+      }
+    } catch {
+      // ignore initial version load failure
+    }
+  }, [ownerId, githubRepoUrl]);
+
+  useEffect(() => {
+    fetchVersionStatus();
+  }, [fetchVersionStatus]);
+
   useEffect(() => {
     setAppName(settings.app_name);
     setBusinessName(settings.business_name);
@@ -121,17 +161,31 @@ export function SettingsView({
     setMikrotikUser(settings.mikrotik_user || 'admin');
     setMikrotikPassword(settings.mikrotik_password || '');
     setMikrotikProtocol(settings.mikrotik_protocol || 'api');
+    if (settings.github_repo_url) setGithubRepoUrl(settings.github_repo_url);
+    if (settings.github_branch) setGithubBranch(settings.github_branch);
   }, [settings]);
 
   const handleProtocolChange = (proto: 'api' | 'api-ssl' | 'rest-http' | 'rest-https') => {
     setMikrotikProtocol(proto);
-    if (proto === 'api' && (mikrotikPort === 8729 || mikrotikPort === 80 || mikrotikPort === 443)) {
+    if (
+      proto === 'api' &&
+      (mikrotikPort === 8729 || mikrotikPort === 80 || mikrotikPort === 443)
+    ) {
       setMikrotikPort(8728);
-    } else if (proto === 'api-ssl' && (mikrotikPort === 8728 || mikrotikPort === 80 || mikrotikPort === 443)) {
+    } else if (
+      proto === 'api-ssl' &&
+      (mikrotikPort === 8728 || mikrotikPort === 80 || mikrotikPort === 443)
+    ) {
       setMikrotikPort(8729);
-    } else if (proto === 'rest-http' && (mikrotikPort === 8728 || mikrotikPort === 8729 || mikrotikPort === 443)) {
+    } else if (
+      proto === 'rest-http' &&
+      (mikrotikPort === 8728 || mikrotikPort === 8729 || mikrotikPort === 443)
+    ) {
       setMikrotikPort(80);
-    } else if (proto === 'rest-https' && (mikrotikPort === 8728 || mikrotikPort === 8729 || mikrotikPort === 80)) {
+    } else if (
+      proto === 'rest-https' &&
+      (mikrotikPort === 8728 || mikrotikPort === 8729 || mikrotikPort === 80)
+    ) {
       setMikrotikPort(443);
     }
   };
@@ -151,9 +205,11 @@ export function SettingsView({
         password: mikrotikPassword,
         protocol: mikrotikProtocol,
       });
+      const bName = res.router.boardName || res.router.board_name || 'RouterOS';
+      const cLoad = res.router.cpuLoad ?? res.router.cpu_load ?? 0;
       setMikrotikTestResult({
         ok: true,
-        message: `Terhubung ke "${res.router.identity}" (${res.router.board_name} · RouterOS v${res.router.version}) — CPU ${res.router.cpu_load}%, RAM ${res.router.memory_used_percent}%, Uptime ${res.router.uptime}`,
+        message: `Terhubung ke "${res.router.identity}" (${bName} · RouterOS v${res.router.version}) — CPU ${cLoad}%, Uptime ${res.router.uptime}`,
       });
       onNotify(`Koneksi MikroTik berhasil: ${res.router.identity}`);
     } catch (err: any) {
@@ -164,6 +220,50 @@ export function SettingsView({
       onNotify(err?.message || 'Koneksi ke Router MikroTik gagal.', 'error');
     } finally {
       setIsTestingMikrotik(false);
+    }
+  };
+
+  const handleCheckGitHubUpdate = async () => {
+    if (!githubRepoUrl.trim()) {
+      onNotify(
+        'Masukkan URL Repositori GitHub terlebih dahulu (contoh: https://github.com/username/simple-billing-isp).',
+        'error'
+      );
+      return;
+    }
+    setIsCheckingUpdate(true);
+    setUpdateCheckResult(null);
+    try {
+      const res = await api.checkGitHubUpdate(ownerId, {
+        repoUrl: githubRepoUrl.trim(),
+        branch: githubBranch.trim() || 'main',
+      });
+      setUpdateCheckResult(res);
+      onNotify(res.message);
+    } catch (err: any) {
+      onNotify(err?.message || 'Gagal memeriksa pembaruan dari GitHub.', 'error');
+    } finally {
+      setIsCheckingUpdate(false);
+    }
+  };
+
+  const handleConfirmExecuteUpdate = async () => {
+    setIsExecutingUpdate(true);
+    setUpdateLogs([]);
+    try {
+      const res = await api.executeGitHubUpdate(ownerId, {
+        repoUrl: githubRepoUrl.trim(),
+        branch: githubBranch.trim() || 'main',
+      });
+      setUpdateLogs(res.logs || []);
+      setIsConfirmUpdateOpen(false);
+      await fetchVersionStatus();
+      setUpdateCheckResult(null);
+      onNotify(res.message);
+    } catch (err: any) {
+      onNotify(err?.message || 'Gagal memperbarui aplikasi dari GitHub.', 'error');
+    } finally {
+      setIsExecutingUpdate(false);
     }
   };
 
@@ -188,7 +288,9 @@ export function SettingsView({
 
       const uploadedUrl = await onUploadLogo(dataUrl);
       setLogoUrl(uploadedUrl);
-      onNotify('Logo berhasil diunggah ke penyimpanan berkas. Klik Simpan Pengaturan untuk menerapkan.');
+      onNotify(
+        'Logo berhasil diunggah ke penyimpanan berkas. Klik Simpan Pengaturan untuk menerapkan.'
+      );
     } catch (err: any) {
       onNotify(err?.message || 'Gagal mengunggah logo.', 'error');
     } finally {
@@ -272,6 +374,8 @@ export function SettingsView({
         mikrotik_user: mikrotikUser.trim(),
         mikrotik_password: mikrotikPassword,
         mikrotik_protocol: mikrotikProtocol,
+        github_repo_url: githubRepoUrl.trim(),
+        github_branch: githubBranch.trim() || 'main',
       });
       onNotify('Pengaturan bisnis, MikroTik API, dan template WhatsApp berhasil disimpan.');
     } catch (err: any) {
@@ -779,7 +883,201 @@ export function SettingsView({
         </div>
       </div>
 
-      {/* 6. Zona Berbahaya: Penghapusan Data Akun Bisnis */}
+      {/* 6. Update Aplikasi & Sistem Versi via GitHub (Anti-RCE Hardened) */}
+      <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 sm:p-6 space-y-5">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-slate-100 dark:border-slate-800">
+          <div className="flex items-start gap-3">
+            <div className="w-10 h-10 rounded-xl bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 flex items-center justify-center shrink-0">
+              <GitBranch className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 className="text-base font-bold text-slate-900 dark:text-slate-100">
+                  Sistem Versi & Update Aplikasi via GitHub
+                </h2>
+                <span className="font-mono tabular-nums text-xs font-bold px-2.5 py-0.5 rounded-md bg-blue-50 dark:bg-blue-950/60 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800">
+                  v{versionInfo?.version || '1.2.0'}
+                </span>
+                <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-600 dark:text-emerald-400">
+                  <ShieldCheck className="w-3.5 h-3.5" />
+                  Anti-RCE Hardened
+                </span>
+              </div>
+              <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                Periksa versi terbaru pada repositori GitHub dan perbarui kode aplikasi secara otomatis tanpa menghapus database pelanggan di folder <code className="font-mono">/data</code>.
+              </p>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            disabled={isCheckingUpdate}
+            onClick={handleCheckGitHubUpdate}
+            className="min-h-[40px] px-4 py-2 text-xs font-semibold text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/60 hover:bg-indigo-100 dark:hover:bg-indigo-900/50 rounded-xl inline-flex items-center gap-1.5 transition-colors self-start sm:self-auto whitespace-nowrap shrink-0"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${isCheckingUpdate ? 'animate-spin' : ''}`} />
+            <span>{isCheckingUpdate ? 'Memeriksa GitHub...' : 'Cek Pembaruan'}</span>
+          </button>
+        </div>
+
+        {/* Version & Runtime Telemetry Strip */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+          <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800">
+            <span className="text-slate-500 dark:text-slate-400">Versi Aplikasi Saat Ini</span>
+            <p className="font-mono tabular-nums font-bold text-sm text-slate-900 dark:text-slate-100 mt-0.5">
+              v{versionInfo?.version || '1.2.0'} ({versionInfo?.releaseDate || '2026-11-02'})
+            </p>
+          </div>
+          <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800">
+            <span className="text-slate-500 dark:text-slate-400">Runtime Engine</span>
+            <p className="font-mono tabular-nums font-bold text-sm text-slate-900 dark:text-slate-100 mt-0.5">
+              Node.js {versionInfo?.nodeVersion || '-'}
+            </p>
+          </div>
+          <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800">
+            <span className="text-slate-500 dark:text-slate-400">Commit Git Lokal</span>
+            <p className="font-mono tabular-nums font-bold text-sm text-slate-900 dark:text-slate-100 mt-0.5 truncate">
+              {versionInfo?.git.commitHash || '-'} ({versionInfo?.git.branch || 'main'})
+            </p>
+          </div>
+          <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800">
+            <span className="text-slate-500 dark:text-slate-400">Mode Eksekusi Update</span>
+            <p className="font-mono font-bold text-xs text-emerald-600 dark:text-emerald-400 mt-1">
+              execFile (No-Shell)
+            </p>
+          </div>
+        </div>
+
+        {/* Repository URL & Branch Inputs */}
+        <div className="grid grid-cols-1 md:grid-cols-12 gap-4">
+          <div className="md:col-span-9">
+            <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
+              URL Repositori GitHub Resmi (HTTPS)
+            </label>
+            <input
+              type="url"
+              value={githubRepoUrl}
+              onChange={(e) => setGithubRepoUrl(e.target.value)}
+              placeholder="https://github.com/username/simple-billing-mini-isp"
+              className="w-full min-h-[44px] px-3.5 py-2 text-sm font-mono bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-slate-900 dark:text-slate-100"
+            />
+          </div>
+
+          <div className="md:col-span-3">
+            <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
+              Branch Target
+            </label>
+            <input
+              type="text"
+              value={githubBranch}
+              onChange={(e) => setGithubBranch(e.target.value)}
+              placeholder="main"
+              className="w-full min-h-[44px] px-3.5 py-2 text-sm font-mono bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-slate-900 dark:text-slate-100"
+            />
+          </div>
+        </div>
+
+        {/* Check Update Result Box */}
+        {updateCheckResult && (
+          <div
+            className={`p-4 rounded-xl border space-y-3 text-xs ${
+              updateCheckResult.updateAvailable
+                ? 'bg-blue-50/70 dark:bg-blue-950/40 border-blue-200 dark:border-blue-800'
+                : 'bg-emerald-50/70 dark:bg-emerald-950/40 border-emerald-200 dark:border-emerald-800'
+            }`}
+          >
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <p className="font-bold text-sm text-slate-900 dark:text-slate-100">
+                  {updateCheckResult.message}
+                </p>
+                <p className="font-mono text-slate-600 dark:text-slate-300 mt-0.5">
+                  Versi Lokal: <strong>v{updateCheckResult.localVersion}</strong> → Versi GitHub:{' '}
+                  <strong className="text-blue-600 dark:text-blue-400">
+                    v{updateCheckResult.remoteVersion}
+                  </strong>
+                  {updateCheckResult.behindCommits > 0
+                    ? ` (${updateCheckResult.behindCommits} commit baru)`
+                    : ''}
+                </p>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setIsConfirmUpdateOpen(true)}
+                disabled={isExecutingUpdate}
+                className="min-h-[40px] px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold inline-flex items-center gap-1.5 shrink-0 self-start sm:self-auto"
+              >
+                <ArrowUpCircle className="w-4 h-4" />
+                <span>
+                  {updateCheckResult.updateAvailable
+                    ? `Update ke v${updateCheckResult.remoteVersion}`
+                    : 'Tarik Ulang (Sinkronkan) dari GitHub'}
+                </span>
+              </button>
+            </div>
+
+            {updateCheckResult.remoteChangelog.length > 0 && (
+              <div className="pt-2 border-t border-slate-200/70 dark:border-slate-800 space-y-1">
+                <p className="font-semibold text-slate-700 dark:text-slate-300">
+                  Catatan Rilis (version.json di GitHub):
+                </p>
+                <ul className="list-disc list-inside space-y-0.5 text-slate-600 dark:text-slate-400">
+                  {updateCheckResult.remoteChangelog.slice(0, 3).map((item, i) => (
+                    <li key={i}>{item}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {updateCheckResult.recentCommits.length > 0 && (
+              <div className="pt-2 border-t border-slate-200/70 dark:border-slate-800 space-y-1">
+                <p className="font-semibold text-slate-700 dark:text-slate-300">
+                  Commit Terbaru pada Branch ({updateCheckResult.branch}):
+                </p>
+                <div className="font-mono text-[11px] space-y-0.5 text-slate-600 dark:text-slate-400">
+                  {updateCheckResult.recentCommits.map((c, i) => (
+                    <p key={i}>{c}</p>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Execution Logs Terminal Output */}
+        {updateLogs.length > 0 && (
+          <div className="p-3.5 rounded-xl bg-slate-950 text-slate-100 border border-slate-800 font-mono text-[11px] space-y-1">
+            <div className="flex items-center gap-1.5 text-emerald-400 font-bold pb-1 border-b border-slate-800">
+              <Terminal className="w-3.5 h-3.5" />
+              <span>Log Pembaruan Aplikasi (GitHub Updater)</span>
+            </div>
+            {updateLogs.map((line, idx) => (
+              <p key={idx} className="leading-relaxed">
+                {line}
+              </p>
+            ))}
+          </div>
+        )}
+
+        {/* Local Changelog History */}
+        {versionInfo && versionInfo.changelog.length > 0 && (
+          <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 text-xs space-y-1.5">
+            <p className="font-bold text-slate-700 dark:text-slate-300">
+              Riwayat Perubahan Versi Aplikasi (Changelog):
+            </p>
+            <ul className="space-y-1 text-slate-600 dark:text-slate-400">
+              {versionInfo.changelog.map((entry, idx) => (
+                <li key={idx} className="leading-relaxed">
+                  • {entry}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </div>
+
+      {/* 7. Zona Berbahaya: Penghapusan Data Akun Bisnis */}
       <div className="bg-white dark:bg-slate-900 border border-rose-200 dark:border-rose-900/60 rounded-2xl p-5 sm:p-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h3 className="text-sm font-bold text-rose-600 dark:text-rose-400">
@@ -898,6 +1196,17 @@ export function SettingsView({
           </div>
         )}
       </Modal>
+
+      {/* Confirm GitHub Update Modal */}
+      <ConfirmDialog
+        isOpen={isConfirmUpdateOpen}
+        onClose={() => setIsConfirmUpdateOpen(false)}
+        onConfirm={handleConfirmExecuteUpdate}
+        isLoading={isExecutingUpdate}
+        title="Konfirmasi Update Aplikasi dari GitHub"
+        confirmLabel="Ya, Update Sekarang"
+        message={`Apakah Anda yakin ingin menarik dan menerapkan pembaruan dari "${githubRepoUrl}" (branch: ${githubBranch})? Seluruh data pelanggan, tagihan, dan logo di folder /data tetap aman dan tidak akan terhapus.`}
+      />
 
       <ConfirmDialog
         isOpen={isConfirmDeleteOpen}

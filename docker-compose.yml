@@ -1,0 +1,23 @@
+services:
+  simple-billing-isp:
+    container_name: simple-billing-mini-isp
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - TZ=Asia/Jakarta
+    volumes:
+      # Volume persisten agar database (db.json) dan foto bukti bayar/logo (uploads/)
+      # tetap aman meskipun container di-rebuild atau di-update
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/api/system/version"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s

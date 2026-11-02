@@ -1,7 +1,10 @@
 import {
   AppSettings,
+  AppVersionInfo,
   Customer,
   Expense,
+  GitHubUpdateCheckResponse,
+  GitHubUpdateExecuteResponse,
   MikrotikMonitorResponse,
   MikrotikProtocol,
   Payment,
@@ -70,9 +73,13 @@ export const api = {
       customers: Partial<Customer>[];
       payments: Partial<Payment>[];
       expenses: Partial<Expense>[];
-      packages: Partial<WifiPackage>[];
+      wifi_packages: Partial<WifiPackage>[];
     }
   ): Promise<{
+    customersCount: number;
+    paymentsCount: number;
+    expensesCount: number;
+    packagesCount: number;
     restoredCustomers: number;
     restoredPayments: number;
     restoredExpenses: number;
@@ -267,9 +274,13 @@ export const api = {
     router: {
       identity: string;
       boardName: string;
+      board_name?: string;
       version: string;
       uptime: string;
       cpuLoad: number;
+      cpu_load?: number;
+      memoryUsagePercent?: number;
+      memory_used_percent?: number;
     };
   }> => {
     const res = await fetch('/api/mikrotik/test', {
@@ -303,5 +314,37 @@ export const api = {
       body: JSON.stringify(payload),
     });
     return handleResponse<{ message: string }>(res);
+  },
+
+  // System Version & GitHub Update (Anti-RCE Hardened)
+  getSystemVersion: async (ownerId: string): Promise<AppVersionInfo> => {
+    const res = await fetch('/api/system/version', {
+      headers: getHeaders(ownerId),
+    });
+    return handleResponse<AppVersionInfo>(res);
+  },
+
+  checkGitHubUpdate: async (
+    ownerId: string,
+    payload: { repoUrl: string; branch: string }
+  ): Promise<GitHubUpdateCheckResponse> => {
+    const res = await fetch('/api/system/github-check', {
+      method: 'POST',
+      headers: getHeaders(ownerId),
+      body: JSON.stringify(payload),
+    });
+    return handleResponse<GitHubUpdateCheckResponse>(res);
+  },
+
+  executeGitHubUpdate: async (
+    ownerId: string,
+    payload: { repoUrl: string; branch: string }
+  ): Promise<GitHubUpdateExecuteResponse> => {
+    const res = await fetch('/api/system/github-update', {
+      method: 'POST',
+      headers: getHeaders(ownerId),
+      body: JSON.stringify(payload),
+    });
+    return handleResponse<GitHubUpdateExecuteResponse>(res);
   },
 };

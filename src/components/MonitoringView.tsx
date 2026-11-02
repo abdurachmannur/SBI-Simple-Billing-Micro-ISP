@@ -121,8 +121,10 @@ export function MonitoringView({
     try {
       const res = await api.executeMikrotikAction(ownerId, {
         action: pendingAction.action,
-        username: pendingAction.item.username,
-        customer_id: pendingAction.item.customer_id,
+        secretId: pendingAction.item.secretId,
+        activeSessionId: pendingAction.item.activeSessionId,
+        queueId: pendingAction.item.queueId,
+        targetAccount: pendingAction.item.targetAccount,
       });
       onNotify(res.message || 'Perintah berhasil dikirim ke Router MikroTik.');
       setPendingAction(null);
@@ -140,17 +142,18 @@ export function MonitoringView({
     const q = search.trim().toLowerCase();
 
     const list = items.filter((item) => {
-      if (statusFilter === 'online' && (!item.online || item.isolated)) return false;
-      if (statusFilter === 'offline' && (item.online || item.isolated)) return false;
-      if (statusFilter === 'isolated' && !item.isolated) return false;
+      if (statusFilter === 'online' && item.onlineStatus !== 'online') return false;
+      if (statusFilter === 'offline' && item.onlineStatus !== 'offline') return false;
+      if (statusFilter === 'isolated' && item.onlineStatus !== 'isolated') return false;
 
       if (!q) return true;
-      const cust = item.customer_id ? customerMap.get(item.customer_id) : undefined;
+      const cust = item.customerId ? customerMap.get(item.customerId) : undefined;
       return (
-        item.customer_name.toLowerCase().includes(q) ||
-        item.username.toLowerCase().includes(q) ||
-        item.ip_address.toLowerCase().includes(q) ||
-        item.mac_address.toLowerCase().includes(q) ||
+        item.customerName.toLowerCase().includes(q) ||
+        item.targetAccount.toLowerCase().includes(q) ||
+        item.ipAddress.toLowerCase().includes(q) ||
+        item.macAddress.toLowerCase().includes(q) ||
+        (item.odpInfo && item.odpInfo.toLowerCase().includes(q)) ||
         (cust?.odp_info && cust.odp_info.toLowerCase().includes(q)) ||
         (cust?.address && cust.address.toLowerCase().includes(q))
       );
@@ -159,28 +162,28 @@ export function MonitoringView({
     list.sort((a, b) => {
       if (sortBy === 'offline_first') {
         const score = (x: MikrotikCustomerMonitorItem) =>
-          x.isolated ? 1 : !x.online ? 0 : 2;
+          x.onlineStatus === 'offline' ? 0 : x.onlineStatus === 'isolated' ? 1 : 2;
         const diff = score(a) - score(b);
         if (diff !== 0) return diff;
-        return a.customer_name.localeCompare(b.customer_name, 'id');
+        return a.customerName.localeCompare(b.customerName, 'id');
       }
       if (sortBy === 'online_first') {
         const score = (x: MikrotikCustomerMonitorItem) =>
-          x.online && !x.isolated ? 0 : x.isolated ? 1 : 2;
+          x.onlineStatus === 'online' ? 0 : x.onlineStatus === 'isolated' ? 1 : 2;
         const diff = score(a) - score(b);
         if (diff !== 0) return diff;
-        return b.rx_bps - a.rx_bps;
+        return (b.rxRateBps || 0) - (a.rxRateBps || 0);
       }
       if (sortBy === 'rx_desc') {
-        return (b.rx_bps || 0) - (a.rx_bps || 0);
+        return (b.rxRateBps || 0) - (a.rxRateBps || 0);
       }
       if (sortBy === 'tx_desc') {
-        return (b.tx_bps || 0) - (a.tx_bps || 0);
+        return (b.txRateBps || 0) - (a.txRateBps || 0);
       }
       if (sortBy === 'uptime_desc') {
-        return (b.uptime || '').localeCompare(a.uptime || '');
+        return (b.uptimeSeconds || 0) - (a.uptimeSeconds || 0);
       }
-      return a.customer_name.localeCompare(b.customer_name, 'id');
+      return a.customerName.localeCompare(b.customerName, 'id');
     });
 
     return list;
@@ -213,7 +216,13 @@ export function MonitoringView({
   }
 
   const routerHealth = monitorData?.router;
-  const summary = monitorData?.summary || { total: 0, online: 0, offline: 0, isolated: 0 };
+  const allItems = monitorData?.items || [];
+  const summary = monitorData?.summary || {
+    total: allItems.length,
+    online: allItems.filter((i) => i.onlineStatus === 'online').length,
+    offline: allItems.filter((i) => i.onlineStatus === 'offline').length,
+    isolated: allItems.filter((i) => i.onlineStatus === 'isolated').length,
+  };
 
   return (
     <div className="space-y-5">
@@ -232,7 +241,7 @@ export function MonitoringView({
                 {routerHealth ? (
                   <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-600 dark:text-emerald-400">
                     <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-                    Terhubung ({routerHealth.board_name} · v{routerHealth.version})
+                    Terhubung ({routerHealth.boardName} · v{routerHealth.version})
                   </span>
                 ) : (
                   <span className="text-xs font-mono text-slate-500">
@@ -288,7 +297,7 @@ export function MonitoringView({
                 <Cpu className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
               </div>
               <p className="font-mono tabular-nums text-base font-bold text-slate-900 dark:text-slate-100 mt-1">
-                {routerHealth.cpu_load}%
+                {routerHealth.cpuLoad}%
               </p>
             </div>
 
@@ -298,7 +307,7 @@ export function MonitoringView({
                 <HardDrive className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
               </div>
               <p className="font-mono tabular-nums text-base font-bold text-slate-900 dark:text-slate-100 mt-1">
-                {routerHealth.memory_used_percent}%
+                {routerHealth.memoryUsagePercent}%
               </p>
             </div>
 
@@ -471,25 +480,29 @@ export function MonitoringView({
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800/70 text-sm">
                 {filteredItems.map((item) => {
-                  const cust = item.customer_id ? customerMap.get(item.customer_id) : undefined;
-                  const waPhone = cust?.phone ? normalizeWhatsAppPhone(cust.phone) : '';
+                  const cust = item.customerId ? customerMap.get(item.customerId) : undefined;
+                  const waPhone = normalizeWhatsAppPhone(item.phone || cust?.phone || '');
+                  const mapsLink = item.mapsUrl || cust?.maps_url || '';
+                  const odpText = item.odpInfo || cust?.odp_info || '';
+                  const isIsolated = item.onlineStatus === 'isolated';
+                  const isOnline = item.onlineStatus === 'online';
 
                   return (
                     <tr
-                      key={`${item.source}_${item.username}`}
+                      key={item.key}
                       className="hover:bg-slate-50/80 dark:hover:bg-slate-800/40 transition-colors"
                     >
                       <td className="py-3.5 px-4">
                         <p className="font-semibold text-slate-900 dark:text-slate-100">
-                          {item.customer_name}
+                          {item.customerName}
                         </p>
                         <div className="flex flex-wrap items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                          <span>{item.package_name || cust?.package_name || '-'}</span>
-                          {cust?.odp_info && (
+                          <span>{item.packageName || cust?.package_name || '-'}</span>
+                          {odpText && (
                             <>
                               <span>·</span>
                               <span className="text-slate-600 dark:text-slate-300 font-medium">
-                                {cust.odp_info}
+                                {odpText}
                               </span>
                             </>
                           )}
@@ -498,24 +511,26 @@ export function MonitoringView({
 
                       <td className="py-3.5 px-4 text-xs font-mono tabular-nums">
                         <p className="font-semibold text-slate-800 dark:text-slate-200">
-                          {item.username}{' '}
+                          {item.targetAccount}{' '}
                           <span className="text-[10px] uppercase font-sans font-semibold px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400">
-                            {item.source}
+                            {item.sourceType}
                           </span>
                         </p>
                         <p className="text-slate-500 dark:text-slate-400 mt-0.5">
-                          IP: {item.ip_address || '-'}
-                          {item.mac_address ? ` · MAC: ${item.mac_address}` : ''}
+                          IP: {item.ipAddress || '-'}
+                          {item.macAddress && item.macAddress !== '-'
+                            ? ` · MAC: ${item.macAddress}`
+                            : ''}
                         </p>
                       </td>
 
                       <td className="py-3.5 px-4 whitespace-nowrap">
-                        {item.isolated ? (
+                        {isIsolated ? (
                           <span className="inline-flex items-center gap-1.5 text-xs font-bold text-amber-600 dark:text-amber-400">
                             <ShieldAlert className="w-3.5 h-3.5" />
                             Terisolir (Disabled)
                           </span>
-                        ) : item.online ? (
+                        ) : isOnline ? (
                           <span className="inline-flex items-center gap-1.5 text-xs font-bold text-emerald-600 dark:text-emerald-400">
                             <span className="w-2 h-2 rounded-full bg-emerald-500" />
                             Online
@@ -534,22 +549,22 @@ export function MonitoringView({
                       <td className="py-3.5 px-4 text-right font-mono tabular-nums text-xs whitespace-nowrap">
                         <div className="inline-flex items-center justify-end gap-1 text-emerald-600 dark:text-emerald-400 font-semibold">
                           <ArrowDown className="w-3 h-3" />
-                          <span>{formatBps(item.rx_bps)}</span>
+                          <span>{formatBps(item.rxRateBps)}</span>
                         </div>
-                        <div className=" flex items-center justify-end gap-1 text-blue-600 dark:text-blue-400 mt-0.5">
+                        <div className="flex items-center justify-end gap-1 text-blue-600 dark:text-blue-400 mt-0.5">
                           <ArrowUp className="w-3 h-3" />
-                          <span>{formatBps(item.tx_bps)}</span>
+                          <span>{formatBps(item.txRateBps)}</span>
                         </div>
                       </td>
 
                       <td className="py-3.5 px-4 text-right font-mono tabular-nums text-xs text-slate-600 dark:text-slate-300 whitespace-nowrap">
-                        <p>DL: {formatBytes(item.rx_bytes)}</p>
-                        <p className="text-slate-400 mt-0.5">UL: {formatBytes(item.tx_bytes)}</p>
+                        <p>DL: {formatBytes(item.rxBytes)}</p>
+                        <p className="text-slate-400 mt-0.5">UL: {formatBytes(item.txBytes)}</p>
                       </td>
 
                       <td className="py-3.5 px-4 text-right whitespace-nowrap">
                         <div className="inline-flex items-center justify-end gap-1.5">
-                          {item.online && (
+                          {isOnline && (
                             <button
                               type="button"
                               onClick={() => setPendingAction({ action: 'kick', item })}
@@ -561,7 +576,7 @@ export function MonitoringView({
                             </button>
                           )}
 
-                          {item.isolated ? (
+                          {isIsolated ? (
                             <button
                               type="button"
                               onClick={() => setPendingAction({ action: 'unisolate', item })}
@@ -595,9 +610,9 @@ export function MonitoringView({
                             </a>
                           )}
 
-                          {cust?.maps_url && (
+                          {mapsLink && (
                             <a
-                              href={cust.maps_url}
+                              href={mapsLink}
                               target="_blank"
                               rel="noopener noreferrer"
                               className="min-h-[36px] min-w-[36px] inline-flex items-center justify-center rounded-xl bg-blue-50 dark:bg-blue-950/50 text-blue-600 dark:text-blue-400 hover:bg-blue-100"
@@ -618,33 +633,37 @@ export function MonitoringView({
           {/* Mobile Card List */}
           <div className="lg:hidden divide-y divide-slate-100 dark:divide-slate-800">
             {filteredItems.map((item) => {
-              const cust = item.customer_id ? customerMap.get(item.customer_id) : undefined;
-              const waPhone = cust?.phone ? normalizeWhatsAppPhone(cust.phone) : '';
+              const cust = item.customerId ? customerMap.get(item.customerId) : undefined;
+              const waPhone = normalizeWhatsAppPhone(item.phone || cust?.phone || '');
+              const mapsLink = item.mapsUrl || cust?.maps_url || '';
+              const odpText = item.odpInfo || cust?.odp_info || '';
+              const isIsolated = item.onlineStatus === 'isolated';
+              const isOnline = item.onlineStatus === 'online';
 
               return (
-                <div key={`${item.source}_${item.username}`} className="p-4 space-y-3">
+                <div key={item.key} className="p-4 space-y-3">
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
                       <p className="font-bold text-slate-900 dark:text-slate-100 truncate">
-                        {item.customer_name}
+                        {item.customerName}
                       </p>
                       <p className="text-xs font-mono text-slate-500 dark:text-slate-400 mt-0.5 truncate">
-                        {item.username} ({item.source}) · IP: {item.ip_address || '-'}
+                        {item.targetAccount} ({item.sourceType}) · IP: {item.ipAddress || '-'}
                       </p>
-                      {cust?.odp_info && (
+                      {odpText && (
                         <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                          ODP: {cust.odp_info}
+                          ODP: {odpText}
                         </p>
                       )}
                     </div>
 
                     <div className="text-right shrink-0">
-                      {item.isolated ? (
+                      {isIsolated ? (
                         <span className="inline-flex items-center gap-1 text-xs font-bold text-amber-600 dark:text-amber-400">
                           <ShieldAlert className="w-3.5 h-3.5" />
                           Terisolir
                         </span>
-                      ) : item.online ? (
+                      ) : isOnline ? (
                         <span className="inline-flex items-center gap-1.5 text-xs font-bold text-emerald-600 dark:text-emerald-400">
                           <span className="w-2 h-2 rounded-full bg-emerald-500" />
                           Online
@@ -668,11 +687,11 @@ export function MonitoringView({
                         Kecepatan Download / Upload
                       </span>
                       <span className="text-emerald-600 dark:text-emerald-400 font-bold">
-                        ↓ {formatBps(item.rx_bps)}
+                        ↓ {formatBps(item.rxRateBps)}
                       </span>{' '}
                       /{' '}
                       <span className="text-blue-600 dark:text-blue-400">
-                        ↑ {formatBps(item.tx_bps)}
+                        ↑ {formatBps(item.txRateBps)}
                       </span>
                     </div>
                     <div className="text-right">
@@ -680,7 +699,7 @@ export function MonitoringView({
                         Total Pemakaian Data
                       </span>
                       <span className="text-slate-700 dark:text-slate-300 font-semibold">
-                        {formatBytes(item.rx_bytes + item.tx_bytes)}
+                        {formatBytes((item.rxBytes || 0) + (item.txBytes || 0))}
                       </span>
                     </div>
                   </div>
@@ -688,7 +707,7 @@ export function MonitoringView({
                   {/* Action Buttons */}
                   <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
                     <div className="flex items-center gap-1.5">
-                      {item.isolated ? (
+                      {isIsolated ? (
                         <button
                           type="button"
                           onClick={() => setPendingAction({ action: 'unisolate', item })}
@@ -708,7 +727,7 @@ export function MonitoringView({
                         </button>
                       )}
 
-                      {item.online && (
+                      {isOnline && (
                         <button
                           type="button"
                           onClick={() => setPendingAction({ action: 'kick', item })}
@@ -732,9 +751,9 @@ export function MonitoringView({
                           <span>WA</span>
                         </a>
                       )}
-                      {cust?.maps_url && (
+                      {mapsLink && (
                         <a
-                          href={cust.maps_url}
+                          href={mapsLink}
                           target="_blank"
                           rel="noopener noreferrer"
                           className="min-h-[40px] px-3 py-1.5 rounded-xl bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400 text-xs font-semibold inline-flex items-center gap-1"
@@ -774,10 +793,10 @@ export function MonitoringView({
         }
         message={
           pendingAction?.action === 'isolate'
-            ? `Apakah Anda yakin ingin mengisolir (disable) akun "${pendingAction.item.username}" (${pendingAction.item.customer_name}) di Router MikroTik? Sesi aktif pelanggan juga akan diputus.`
+            ? `Apakah Anda yakin ingin mengisolir (disable) akun "${pendingAction.item.targetAccount}" (${pendingAction.item.customerName}) di Router MikroTik? Sesi aktif pelanggan juga akan diputus.`
             : pendingAction?.action === 'unisolate'
-            ? `Apakah Anda yakin ingin membuka isolir (enable) akun "${pendingAction?.item.username}" (${pendingAction?.item.customer_name}) di Router MikroTik?`
-            : `Apakah Anda yakin ingin memutus/mereset sesi aktif "${pendingAction?.item.username}" (${pendingAction?.item.customer_name}) agar perangkat pelanggan melakukan koneksi ulang?`
+            ? `Apakah Anda yakin ingin membuka isolir (enable) akun "${pendingAction?.item.targetAccount}" (${pendingAction?.item.customerName}) di Router MikroTik?`
+            : `Apakah Anda yakin ingin memutus/mereset sesi aktif "${pendingAction?.item.targetAccount}" (${pendingAction?.item.customerName}) agar perangkat pelanggan melakukan koneksi ulang?`
         }
       />
     </div>
