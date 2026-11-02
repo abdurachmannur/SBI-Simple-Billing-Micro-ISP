@@ -1,0 +1,6 @@
+{
+  "summary":  "Rencana implementasi lengkap mencakup Menu Monitoring MikroTik Real-Time (koneksi langsung ke IP Publik/VPN Tunnel MikroTik via RouterOS API & REST API untuk memantau PPPoE Active, Simple Queue, IP Binding/Netwatch/ARP, traffic Rx/Tx, CPU/RAM/Uptime router, serta aksi Isolir/Buka Isolir dan Reset sesi PPPoE) beserta 5 fitur peningkatan sebelumnya (Restore Backup .XLSX, Jatuh Tempo & Filter Menunggak, Riwayat 12 Bulan, Cetak Struk Termal 58mm/80mm, dan Data Teknis/Google Maps).",
+  "updatedAt":  "2026-11-02T03:57:40.704150425Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}

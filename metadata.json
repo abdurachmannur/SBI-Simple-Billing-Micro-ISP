@@ -1,0 +1,6 @@
+{
+  "name": "Simple Billing Mini ISP",
+  "description": "Aplikasi manajemen pelanggan WiFi, tagihan bulanan, pembayaran, pengingat WhatsApp, pengeluaran, dan laporan keuangan untuk RT/RW Net & Mini ISP.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
