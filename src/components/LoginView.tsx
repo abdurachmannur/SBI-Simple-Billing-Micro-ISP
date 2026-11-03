@@ -120,7 +120,7 @@ export function LoginView({
       <div className="max-w-5xl w-full mx-auto flex items-center justify-between gap-4 pt-1">
         <div className="inline-flex items-center gap-2 text-xs font-medium text-slate-600 dark:text-slate-400">
           <ShieldCheck className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
-          <span>Gerbang Produksi Terenkripsi</span>
+          <span>SBI App</span>
           <span aria-hidden="true">·</span>
           <span className="font-mono tabular-nums">v{branding?.version || '1.3.0'}</span>
         </div>
@@ -297,8 +297,8 @@ export function LoginView({
 
           {/* Footer Security Info */}
           <div className="pt-4 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-400">
-            <span>Proteksi Scrypt & Brute-Force</span>
-            <span>Auto-Logout 2 Jam Idle</span>
+            <span>Aplikasi Simple Billing Micro ISP</span>
+            <span>Build v.1.3.0 - rdw75</span>
           </div>
         </div>
       </div>
