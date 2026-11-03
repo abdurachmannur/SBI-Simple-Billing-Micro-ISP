@@ -1,11 +1,12 @@
 {
-  "version": "1.2.0",
-  "releaseDate": "2026-11-02",
-  "channel": "stable",
+  "version": "1.3.0",
+  "releaseDate": "2026-11-03",
+  "channel": "production",
   "minNodeVersion": "22.0.0",
   "changelog": [
-    "v1.2.0 — Penambahan Menu Monitoring Pelanggan MikroTik Real-Time (PPPoE Active, Simple Queue, IP Binding/Netwatch, CPU/RAM/Uptime, Isolir & Reset Sesi), Sistem Penomoran Versi & Update Aplikasi via GitHub di Pengaturan dengan proteksi Anti-RCE (execFile tanpa shell), serta dukungan Docker.",
-    "v1.1.0 — Penambahan fitur Restore dari file Backup .XLSX, Tanggal Jatuh Tempo & Filter Menunggak, Riwayat Pembayaran 12 Bulan, Cetak Struk Termal 58mm/80mm, serta Data Teknis PPPoE/IP, ODP, dan Link Google Maps.",
-    "v1.0.0 — Rilis awal Simple Billing Mini ISP (Dashboard Keuangan, Manajemen Pelanggan, Tagihan Massal Anti-Duplikat, Pengingat WhatsApp, Cetak Invoice A4, Pencarian Cepat Header Ctrl+K, dan Backup Lengkap .XLSX)."
+    "v1.3.0 — Rilis Siap Produksi (Production Security): Halaman Login dengan Logo Bisnis dinamis, akun default (admin / admin123) dengan wajib ganti password saat login pertama, enkripsi password Scrypt + Token Sesi HMAC, proteksi Brute-Force (blokir IP 15 menit setelah 5x gagal), sembunyikan password MikroTik dari respons API browser, serta Auto-Logout ketat setelah 2 jam tanpa aktivitas.",
+    "v1.2.0 — Sistem penomoran versi resmi (version.json), fitur Cek & Update Aplikasi otomatis via GitHub di menu Pengaturan dengan perlindungan Anti-RCE (execFile tanpa shell), serta dukungan penuh Docker & panduan instalasi lintas platform.",
+    "v1.1.0 — Integrasi Monitoring Pelanggan MikroTik Real-Time (PPPoE Active, Simple Queue, Netwatch/ARP, Isolir/Buka Isolir, Reset PPPoE, indikator CPU/RAM/Uptime), Restore Backup .XLSX, cetak struk termal 58mm/80mm, dan riwayat 12 bulan.",
+    "v1.0.0 — Rilis awal Simple Billing Mini ISP (Dashboard, Pelanggan, Tagihan Bulanan, Pengeluaran, Paket WiFi, Pengingat WhatsApp, dan Invoice PDF/PNG)."
   ]
 }

@@ -1,6 +1,6 @@
 {
-  "summary":  "Rencana revisi yang mencakup fitur \"Update Aplikasi via GitHub\" langsung dari menu Pengaturan (cek pembaruan, lihat changelog commit terbaru, dan tarik update otomatis via git pull + build tanpa menghapus database /data), beserta pembuatan README.md lengkap dan konfigurasi Docker (Dockerfile dengan git terinstal, docker-compose.yml, .dockerignore).",
-  "updatedAt":  "2026-11-02T04:32:13.383744590Z",
-  "requestFeedback":  true,
-  "userFacing":  true
+  "summary": "Rencana implementasi v1.3.0 Production Security & Authentication untuk Simple Billing Mini ISP: Halaman Login dengan Logo Bisnis dinamis, akun Admin default beserta kewajiban ganti password saat pertama kali login, enkripsi password Scrypt + token sesi kriptografi dengan auto-logout 2 jam inaktivitas, proteksi Brute-Force IP Lockout (5x gagal = blokir 15 menit), penyembunyian kredensial rahasia MikroTik dari respons API browser, serta proteksi menyeluruh seluruh endpoint API.",
+  "updatedAt": "2026-11-03T04:30:30.927392304Z",
+  "requestFeedback": true,
+  "userFacing": true
 }

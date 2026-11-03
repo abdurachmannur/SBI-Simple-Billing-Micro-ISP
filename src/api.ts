@@ -1,6 +1,7 @@
 import {
   AppSettings,
   AppVersionInfo,
+  AuthSessionInfo,
   Customer,
   Expense,
   GitHubUpdateCheckResponse,
@@ -8,26 +9,83 @@ import {
   MikrotikMonitorResponse,
   MikrotikProtocol,
   Payment,
+  PublicBrandingInfo,
   WifiPackage,
 } from './types';
 
+export const AUTH_TOKEN_STORAGE_KEY = 'sb_mini_isp_auth_token';
+
+let unauthorizedHandler: ((reason?: string) => void) | null = null;
+
+export function setUnauthorizedHandler(fn: ((reason?: string) => void) | null) {
+  unauthorizedHandler = fn;
+}
+
+export function getStoredAuthToken(): string {
+  return localStorage.getItem(AUTH_TOKEN_STORAGE_KEY) || '';
+}
+
+export function setStoredAuthToken(token: string) {
+  if (token) {
+    localStorage.setItem(AUTH_TOKEN_STORAGE_KEY, token);
+  } else {
+    localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+  }
+}
+
 function getHeaders(ownerId: string): HeadersInit {
-  return {
+  const token = getStoredAuthToken();
+  const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     'x-owner-id': ownerId,
   };
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  }
+  return headers;
 }
 
-async function handleResponse<T>(res: Response): Promise<T> {
+export class ApiError extends Error {
+  status: number;
+  code?: string;
+  remainingAttempts?: number;
+  retryAfterSeconds?: number;
+
+  constructor(
+    message: string,
+    status: number,
+    extra?: { code?: string; remainingAttempts?: number; retryAfterSeconds?: number }
+  ) {
+    super(message);
+    this.status = status;
+    this.code = extra?.code;
+    this.remainingAttempts = extra?.remainingAttempts;
+    this.retryAfterSeconds = extra?.retryAfterSeconds;
+  }
+}
+
+async function handleResponse<T>(res: Response, skipAuthRedirect = false): Promise<T> {
   if (!res.ok) {
     let errMsg = 'Terjadi kesalahan pada server.';
+    let code: string | undefined;
+    let remainingAttempts: number | undefined;
+    let retryAfterSeconds: number | undefined;
+
     try {
       const data = await res.json();
       if (data?.error) errMsg = data.error;
+      if (data?.code) code = data.code;
+      if (typeof data?.remainingAttempts === 'number') remainingAttempts = data.remainingAttempts;
+      if (typeof data?.retryAfterSeconds === 'number') retryAfterSeconds = data.retryAfterSeconds;
     } catch {
       // ignore json parse failure
     }
-    throw new Error(errMsg);
+
+    if (res.status === 401 && !skipAuthRedirect && unauthorizedHandler) {
+      unauthorizedHandler(errMsg);
+    }
+
+    throw new ApiError(errMsg, res.status, { code, remainingAttempts, retryAfterSeconds });
   }
   return res.json() as Promise<T>;
 }
@@ -41,6 +99,62 @@ export interface BootstrapResponse {
 }
 
 export const api = {
+  // Public Branding & Production Auth
+  getPublicBranding: async (ownerId: string): Promise<PublicBrandingInfo> => {
+    const res = await fetch('/api/auth/public-branding', {
+      headers: { 'x-owner-id': ownerId },
+    });
+    return handleResponse<PublicBrandingInfo>(res, true);
+  },
+
+  login: async (
+    ownerId: string,
+    payload: { username: string; password: string }
+  ): Promise<AuthSessionInfo> => {
+    const res = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-owner-id': ownerId,
+      },
+      body: JSON.stringify(payload),
+    });
+    return handleResponse<AuthSessionInfo>(res, true);
+  },
+
+  getSession: async (ownerId: string): Promise<AuthSessionInfo> => {
+    const res = await fetch('/api/auth/session', {
+      headers: getHeaders(ownerId),
+    });
+    return handleResponse<AuthSessionInfo>(res, true);
+  },
+
+  logout: async (ownerId: string): Promise<{ success: boolean }> => {
+    const res = await fetch('/api/auth/logout', {
+      method: 'POST',
+      headers: getHeaders(ownerId),
+    });
+    return handleResponse<{ success: boolean }>(res, true);
+  },
+
+  changeAdminCredentials: async (
+    ownerId: string,
+    payload: { currentPassword: string; newUsername: string; newPassword: string }
+  ): Promise<{
+    success: boolean;
+    username: string;
+    mustChangePassword: boolean;
+    token: string;
+    message: string;
+  }> => {
+    const res = await fetch('/api/auth/change-credentials', {
+      method: 'POST',
+      headers: getHeaders(ownerId),
+      body: JSON.stringify(payload),
+    });
+    return handleResponse(res, true);
+  },
+
   bootstrap: async (ownerId: string): Promise<BootstrapResponse> => {
     const res = await fetch('/api/bootstrap', {
       headers: getHeaders(ownerId),

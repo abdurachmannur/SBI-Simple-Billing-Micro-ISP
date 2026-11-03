@@ -94,6 +94,8 @@ export interface WifiPackage {
 
 export type MikrotikProtocol = 'api' | 'api-ssl' | 'rest-http' | 'rest-https';
 
+export const MIKROTIK_PASSWORD_MASK = '••••••••••••';
+
 export interface AppSettings {
   ownerId: string;
   app_name: string;
@@ -111,9 +113,30 @@ export interface AppSettings {
   mikrotik_port?: number;
   mikrotik_user?: string;
   mikrotik_password?: string;
+  has_mikrotik_password?: boolean;
   mikrotik_protocol?: MikrotikProtocol;
   github_repo_url?: string;
   github_branch?: string;
+}
+
+export interface PublicBrandingInfo {
+  app_name: string;
+  business_name: string;
+  business_address: string;
+  logo_url: string;
+  version: string;
+  isDefaultPassword: boolean;
+  defaultUsernameHint?: string;
+}
+
+export interface AuthSessionInfo {
+  authenticated: boolean;
+  token?: string;
+  username: string;
+  ownerId: string;
+  mustChangePassword: boolean;
+  expiresInMs: number;
+  lastPasswordChangedAt?: string;
 }
 
 export interface AppVersionInfo {

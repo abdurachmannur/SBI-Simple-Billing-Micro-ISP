@@ -1,12 +1,12 @@
-# Simple Billing Mini ISP (`v1.2.0`)
+# Simple Billing Mini ISP (`v1.3.0` — Production Ready)
 
-Aplikasi **Manajemen Pelanggan, Tagihan WiFi Bulanan, Pengingat WhatsApp, Cetak Struk Termal, & Monitoring Router MikroTik Real-Time** yang dirancang khusus untuk kebutuhan **RT/RW Net dan Mini ISP** di Indonesia.
+Aplikasi **Manajemen Pelanggan, Tagihan WiFi Bulanan, Pengingat WhatsApp, Cetak Struk Termal, & Monitoring Router MikroTik Real-Time** yang dirancang khusus untuk kebutuhan **RT/RW Net dan Mini ISP** di Indonesia. Dilengkapi dengan **Gerbang Autentikasi Produksi (Scrypt, Brute-Force IP Lockout, & Auto-Logout 2 Jam)** sehingga aman diakses melalui jaringan publik.
 
 ---
 
 ## Daftar Isi
 1. [Deskripsi & Fitur Utama](#1-deskripsi--fitur-utama)
-2. [Arsitektur Teknologi & Keamanan Anti-CVE / Anti-RCE](#2-arsitektur-teknologi--keamanan-anti-cve--anti-rce)
+2. [Keamanan Produksi, Akun Login Default, & Anti-CVE / Anti-RCE](#2-keamanan-produksi-akun-login-default--anti-cve--anti-rce)
 3. [Sistem Penomoran Versi (`version.json`) & Update via GitHub](#3-sistem-penomoran-versi-versionjson--update-via-github)
 4. [Cara Instalasi di Linux (Secara Native)](#4-cara-instalasi-di-linux-secara-native)
    - [Menjalankan di Background dengan PM2 (Direkomendasikan)](#41-menjalankan-di-background-dengan-pm2-direkomendasikan)
@@ -24,9 +24,12 @@ Aplikasi **Manajemen Pelanggan, Tagihan WiFi Bulanan, Pengingat WhatsApp, Cetak 
 
 **Simple Billing Mini ISP** memudahkan pemilik RT/RW Net dan Mini ISP dalam mengelola operasional harian dari satu dasbor web yang cepat, ringan, dan responsif (nyaman dibuka di HP Android maupun Desktop):
 
+- **Halaman Login Produksi dengan Logo Bisnis Dinamis**:
+  - Menampilkan **Logo Bisnis**, **Nama Usaha**, dan **Alamat** yang diunggah di menu Pengaturan secara otomatis pada halaman Login.
+  - Dilengkapi **Proteksi Brute-Force** (blokir sementara IP 15 menit setelah 5x salah password), **Enkripsi Password Scrypt**, **Wajib Ganti Password Default saat Login Pertama**, dan **Auto-Logout ketat setelah 2 jam tanpa aktivitas**.
 - **Dashboard Ringkasan Finansial**: Pantau total pelanggan aktif, pendapatan bulan berjalan, persentase pelanggan lunas vs belum bayar, total pengeluaran operasional, serta estimasi laba bersih.
 - **Manajemen Pelanggan & Data Teknis**:
-  - Simpan nama, nomor WhatsApp, alamat, tanggal jatuh tempo (`1–31`), dan status pelanggan (`Aktif` / `Nonaktif`).
+  - Simpan nama, nomor WhatsApp, alamat, tanggal jatuh tempo (`1–28`), dan status pelanggan (`Aktif` / `Nonaktif`).
   - Data teknis lengkap: **User PPPoE / IP Statis**, **Lokasi ODP / Port / Redaman (dBm)**, serta **Link Koordinat Google Maps** yang bisa diklik langsung oleh teknisi lapangan.
 - **Tagihan Bulanan & Filter Menunggak**:
   - Generate tagihan bulanan otomatis untuk seluruh pelanggan aktif.
@@ -41,46 +44,54 @@ Aplikasi **Manajemen Pelanggan, Tagihan WiFi Bulanan, Pengingat WhatsApp, Cetak 
   - Indikator kesehatan router: **Beban CPU (%)**, **Penggunaan RAM**, **Uptime Router**, **Versi RouterOS**, dan **Board Name**.
   - Pantau status **Online / Offline**, alamat IP, MAC Address, Uptime sesi, serta **Live Traffic Download (Rx) & Upload (Tx)** per pelanggan dengan fitur urutkan (*sort*) berdasarkan pemakaian bandwidth tertinggi.
   - **Tindakan Cepat Langsung dari Aplikasi**:
-    - **Isolir / Buka Isolir Pelanggan** (mengubah profile PPPoE ke profile isolir atau menonaktifkan secret/queue sekaligus memutus sesi aktif agar langsung berlaku).
+    - **Isolir / Buka Isolir Pelanggan** (menonaktifkan secret/queue sekaligus memutus sesi aktif agar langsung berlaku).
     - **Reset Koneksi PPPoE** (memutus sesi aktif agar router pelanggan melakukan *re-dial* ulang).
 - **Backup & Restore Database `.XLSX`**:
   - Ekspor seluruh data (Pelanggan, Paket, Tagihan, Pengeluaran, Pengaturan) ke 1 file Excel (`.xlsx`) multi-sheet.
   - **Restore Data** dari file `.xlsx` kapan saja melalui menu Pengaturan.
-- **Sistem Versi (`v1.2.0`) & Update Aplikasi via GitHub**:
+- **Sistem Versi (`v1.3.0`) & Update Aplikasi via GitHub**:
   - Cek pembaruan versi aplikasi dan riwayat perubahan (*changelog*) langsung dari menu **Pengaturan**, serta lakukan update otomatis dengan 1 klik tanpa menghapus data pelanggan.
 
 ---
 
-## 2. Arsitektur Teknologi & Keamanan Anti-CVE / Anti-RCE
+## 2. Keamanan Produksi, Akun Login Default, & Anti-CVE / Anti-RCE
 
-Aplikasi ini dibangun menggunakan ekosistem modern dengan versi paket terbaru untuk memastikan performa tinggi dan keamanan dari celah kerentanan (*Common Vulnerabilities and Exposures* / **CVE**), khususnya celah *Remote Code Execution* (**RCE**):
+### A. Kredensial Login Default (Login Pertama Kali)
+Saat pertama kali aplikasi dijalankan, gunakan akun default berikut pada halaman Login:
+- **Username Default**: `admin`
+- **Password Default**: `admin123`
 
-| Komponen | Teknologi & Versi | Keterangan Keamanan |
+> **Penting (Keamanan Produksi):** Begitu Anda berhasil masuk dengan password default `admin123`, aplikasi akan otomatis menampilkan layar **Wajib Ganti Password Default** (minimal 8 karakter). Anda juga dapat mengubah Username dan Password Admin kapan saja melalui menu **Pengaturan -> 6. Keamanan Akun Login Admin (Produksi)**.
+
+### B. Standar Pengamanan Publik (Public-Facing Security)
+
+| Komponen | Teknologi & Mekanisme | Keterangan Keamanan |
 | :--- | :--- | :--- |
-| **Runtime Server** | **Node.js v22 LTS / v24 Latest** | Menggunakan rilis Node.js terbaru dengan patch keamanan V8 & OpenSSL terkini. |
-| **Backend Framework** | **Express + TypeScript (`tsx`)** | Header HTTP diamankan (`X-Content-Type-Options: nosniff`, `Referrer-Policy`, `X-Frame-Options`, `x-powered-by` dinonaktifkan). |
-| **Frontend UI** | **React 19 + Vite 8 + Tailwind CSS v4** | Bebas dari kerentanan *Server-Side Rendering* (murni SPA + REST API JSON). |
-| **Database Persisten** | **JSON Atomic File (`data/db.json`)** | Bebas dari risiko *SQL Injection* karena tidak menggunakan query SQL mentah. |
-| **GitHub Updater** | **`node:child_process.execFile`** | **Anti-RCE Hardened**: Mengeksekusi binary `git` dan `npm` secara langsung (`shell: false`) dengan argumen array terpisah serta validasi Regex ketat (`^https://github\.com/[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+(?:\.git)?$`). Karakter injeksi shell seperti `;`, `|`, `&`, `` ` ``, `$()` ditolak sepenuhnya. |
+| **Enkripsi Password** | **`node:crypto.scryptSync` + `timingSafeEqual`** | Password di-hash menggunakan Scrypt 64-byte dengan *random salt* 16-byte dan diverifikasi secara *constant-time* (tahan terhadap *Timing Attack* & *Brute-Force*). |
+| **Token Sesi & Idle Timeout** | **HMAC-SHA256 Signed Bearer Token** | Sesi dikunci secara kriptografi dan **otomatis keluar (Auto-Logout) setelah 2 jam tidak ada aktivitas** baik di sisi server maupun browser. |
+| **Proteksi Brute-Force** | **IP Rate Limiter (5x Gagal = Lockout 15 Menit)** | Jika terdapat 5 kali percobaan login gagal dari alamat IP yang sama, IP tersebut otomatis diblokir sementara selama 15 menit disertai penghitung waktu mundur. |
+| **Masking Kredensial MikroTik** | **Server-Side Credential Masking (`••••••••••••`)** | Password router MikroTik tidak pernah dikirim dalam teks terbuka ke browser (*Inspect Element / Network Tab* aman). |
+| **Runtime Server** | **Node.js v22 LTS / v24 Latest + Express** | Menggunakan rilis Node.js terbaru dengan header HTTP aman (`X-Content-Type-Options: nosniff`, `Referrer-Policy`, `x-powered-by` dinonaktifkan). |
+| **GitHub Updater** | **`node:child_process.execFile` (`shell: false`)** | **Anti-RCE Hardened**: Mengeksekusi binary `git` dan `npm` secara langsung tanpa shell serta validasi Regex ketat pada URL GitHub & nama branch. |
 
 ---
 
 ## 3. Sistem Penomoran Versi (`version.json`) & Update via GitHub
 
-Setiap rilis aplikasi memiliki nomor versi resmi (Semantic Versioning) yang tercatat di dalam file **`version.json`** dan **`package.json`** (saat ini **`v1.2.0`**).
+Setiap rilis aplikasi memiliki nomor versi resmi (Semantic Versioning) yang tercatat di dalam file **`version.json`** dan **`package.json`** (saat ini **`v1.3.0`**).
 
 ### Cara Kerja Update Aplikasi dari Menu Pengaturan:
-1. Buka menu **Pengaturan** -> gulir ke bagian **6. Sistem Versi & Update Aplikasi via GitHub**.
+1. Buka menu **Pengaturan** -> gulir ke bagian **7. Sistem Versi & Update Aplikasi via GitHub**.
 2. Masukkan **URL Repository GitHub** (contoh: `https://github.com/username/simple-billing-mini-isp`) dan **Branch** (contoh: `main`).
 3. Klik tombol **"Cek Pembaruan"**:
-   - Server akan mengambil file `version.json` dari GitHub serta memeriksa commit terbaru menggunakan `git ls-remote`.
+   - Server akan mengambil file `version.json` dari GitHub serta memeriksa commit terbaru.
    - Aplikasi akan menampilkan perbandingan **Versi Terpasang** vs **Versi Terbaru di GitHub** beserta daftar **Changelog (Perubahan Baru)**.
 4. Klik tombol **"Update Sekarang"** jika tersedia versi baru:
    - Aplikasi secara otomatis menjalankan `git fetch`, `git reset --hard origin/<branch>`, `npm install`, dan `npm run build`.
-   - **Data 100% Aman**: Folder `/data` (`db.json` dan `uploads/`) dikecualikan di `.gitignore`, sehingga proses update kode tidak akan pernah menghapus data pelanggan atau tagihan Anda.
+   - **Data 100% Aman**: Folder `/data` (`db.json` dan `uploads/`) dikecualikan di `.gitignore`, sehingga proses update kode tidak akan pernah menghapus data pelanggan, akun login, atau tagihan Anda.
 
 ### Cara Menaikkan Versi Saat Anda Mengubah Kode di GitHub:
-Setiap kali Anda melakukan penambahan fitur atau perbaikan bug pada repository GitHub Anda, ubah nilai `"version"` pada file **`version.json`** dan **`package.json`** (misalnya dari `"1.2.0"` menjadi `"1.3.0"`), tambahkan catatan pada bagian `"changelog"` di `version.json`, lalu lakukan `git commit` dan `git push`.
+Setiap kali Anda melakukan penambahan fitur atau perbaikan bug pada repository GitHub Anda, ubah nilai `"version"` pada file **`version.json`** dan **`package.json`** (misalnya dari `"1.3.0"` menjadi `"1.4.0"`), tambahkan catatan pada bagian `"changelog"` di `version.json`, lalu lakukan `git commit` dan `git push`.
 
 ---
 

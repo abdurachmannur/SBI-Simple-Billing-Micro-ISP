@@ -2,6 +2,7 @@ import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import fs from 'fs';
 import path from 'path';
+import { createHmac, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'url';
@@ -14,6 +15,10 @@ import {
 } from './server/mikrotikClient.js';
 
 const execFileAsync = promisify(execFile);
+const MIKROTIK_PASSWORD_MASK = '••••••••••••';
+const SESSION_IDLE_TIMEOUT_MS = 2 * 60 * 60 * 1000; // Strict 2-hour inactivity timeout
+const MAX_LOGIN_ATTEMPTS = 5;
+const LOCKOUT_DURATION_MS = 15 * 60 * 1000; // 15-minute IP lockout after 5 failed attempts
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -102,9 +107,20 @@ interface AppSettings {
   mikrotik_port?: number;
   mikrotik_user?: string;
   mikrotik_password?: string;
+  has_mikrotik_password?: boolean;
   mikrotik_protocol?: 'api' | 'api-ssl' | 'rest-http' | 'rest-https';
   github_repo_url?: string;
   github_branch?: string;
+}
+
+interface AdminAuthRecord {
+  ownerId: string;
+  username: string;
+  passwordSalt: string;
+  passwordHash: string;
+  mustChangePassword: boolean;
+  sessionSecret: string;
+  updatedAt: string;
 }
 
 interface DatabaseSchema {
@@ -113,6 +129,7 @@ interface DatabaseSchema {
   expenses: Expense[];
   wifi_packages: WifiPackage[];
   app_settings: Record<string, AppSettings>;
+  admin_auth?: AdminAuthRecord;
 }
 
 const DEFAULT_UNPAID_TEMPLATE = `Halo Bapak/Ibu *{nama}*,
@@ -243,6 +260,75 @@ function saveDb(db: DatabaseSchema) {
   fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2), 'utf-8');
 }
 
+function hashPasswordScrypt(password: string, saltHex: string): string {
+  return scryptSync(password, Buffer.from(saltHex, 'hex'), 64).toString('hex');
+}
+
+function verifyPasswordScrypt(password: string, saltHex: string, storedHashHex: string): boolean {
+  try {
+    const derived = scryptSync(password, Buffer.from(saltHex, 'hex'), 64);
+    const stored = Buffer.from(storedHashHex, 'hex');
+    if (derived.length !== stored.length) return false;
+    return timingSafeEqual(derived, stored);
+  } catch {
+    return false;
+  }
+}
+
+function resolvePrimaryOwnerId(db: DatabaseSchema, requestedOwnerId?: string | null): string {
+  if (db.admin_auth?.ownerId) {
+    return db.admin_auth.ownerId;
+  }
+  const existingKeys = Object.keys(db.app_settings || {});
+  if (existingKeys.length > 0) {
+    // Pick owner key that has logo or customers first, or first key
+    const withLogo = existingKeys.find((k) => Boolean(db.app_settings[k]?.logo_url));
+    if (withLogo) return withLogo;
+    return existingKeys[0];
+  }
+  if (requestedOwnerId && requestedOwnerId.trim().length > 0) {
+    return requestedOwnerId.trim().replace(/[^a-zA-Z0-9_-]/g, '');
+  }
+  return 'default_isp_owner';
+}
+
+function ensureAdminAuthInitialized(db: DatabaseSchema, preferredOwnerId?: string | null): AdminAuthRecord {
+  const targetOwnerId = resolvePrimaryOwnerId(db, preferredOwnerId);
+  let modified = false;
+
+  if (!db.admin_auth) {
+    const salt = randomBytes(16).toString('hex');
+    const defaultHash = hashPasswordScrypt('admin123', salt);
+    db.admin_auth = {
+      ownerId: targetOwnerId,
+      username: 'admin',
+      passwordSalt: salt,
+      passwordHash: defaultHash,
+      mustChangePassword: true,
+      sessionSecret: randomBytes(32).toString('hex'),
+      updatedAt: new Date().toISOString(),
+    };
+    modified = true;
+  }
+
+  if (!db.app_settings[db.admin_auth.ownerId]) {
+    db.app_settings[db.admin_auth.ownerId] = createDefaultSettings(db.admin_auth.ownerId);
+    modified = true;
+  }
+
+  const hasPackages = db.wifi_packages.some((p) => p.ownerId === db.admin_auth!.ownerId);
+  if (!hasPackages) {
+    db.wifi_packages.push(...createDefaultPackages(db.admin_auth.ownerId));
+    modified = true;
+  }
+
+  if (modified) {
+    saveDb(db);
+  }
+
+  return db.admin_auth;
+}
+
 function ensureOwnerInitialized(db: DatabaseSchema, ownerId: string) {
   let modified = false;
   if (!db.app_settings[ownerId]) {
@@ -260,12 +346,29 @@ function ensureOwnerInitialized(db: DatabaseSchema, ownerId: string) {
   }
 }
 
+function sanitizeSettingsForClient(s: AppSettings): AppSettings {
+  const hasPass = Boolean(s.mikrotik_password && s.mikrotik_password.length > 0);
+  return {
+    ...s,
+    mikrotik_password: hasPass ? MIKROTIK_PASSWORD_MASK : '',
+    has_mikrotik_password: hasPass,
+  };
+}
+
 function getOwnerId(req: express.Request): string | null {
   const headerOwner = req.headers['x-owner-id'];
   if (typeof headerOwner === 'string' && headerOwner.trim().length > 0) {
     return headerOwner.trim().replace(/[^a-zA-Z0-9_-]/g, '');
   }
   return null;
+}
+
+function getClientIp(req: express.Request): string {
+  const xff = req.headers['x-forwarded-for'];
+  if (typeof xff === 'string' && xff.trim().length > 0) {
+    return xff.split(',')[0].trim();
+  }
+  return req.socket.remoteAddress || 'unknown';
 }
 
 function parseMikrotikPairValue(pairStr: string | undefined): [number, number] {
@@ -282,9 +385,74 @@ function normalizeQueueTargetIp(targetStr: string | undefined): string {
   return firstTarget.replace(/\/\d+$/, '');
 }
 
+interface ActiveSessionRecord {
+  tokenId: string;
+  username: string;
+  ownerId: string;
+  createdAt: number;
+  lastActiveAt: number;
+  ip: string;
+}
+
+interface BruteForceRecord {
+  failedCount: number;
+  lastFailedAt: number;
+  lockedUntil: number;
+}
+
 async function startServer() {
   const app = express();
   const PORT = 3000;
+
+  const activeSessions = new Map<string, ActiveSessionRecord>();
+  const loginAttemptsByIp = new Map<string, BruteForceRecord>();
+
+  function createSignedSessionToken(auth: AdminAuthRecord, ip: string): string {
+    const tokenId = randomBytes(32).toString('hex');
+    const sig = createHmac('sha256', auth.sessionSecret).update(tokenId).digest('hex');
+    const now = Date.now();
+    activeSessions.set(tokenId, {
+      tokenId,
+      username: auth.username,
+      ownerId: auth.ownerId,
+      createdAt: now,
+      lastActiveAt: now,
+      ip,
+    });
+    return `${tokenId}.${sig}`;
+  }
+
+  function verifyAndTouchSessionToken(
+    rawAuthHeader: string | undefined,
+    auth: AdminAuthRecord
+  ): ActiveSessionRecord | null {
+    if (!rawAuthHeader || !rawAuthHeader.startsWith('Bearer ')) return null;
+    const tokenStr = rawAuthHeader.slice(7).trim();
+    const parts = tokenStr.split('.');
+    if (parts.length !== 2) return null;
+    const [tokenId, providedSig] = parts;
+
+    const expectedSig = createHmac('sha256', auth.sessionSecret).update(tokenId).digest('hex');
+    try {
+      const a = Buffer.from(providedSig, 'hex');
+      const b = Buffer.from(expectedSig, 'hex');
+      if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
+    } catch {
+      return null;
+    }
+
+    const session = activeSessions.get(tokenId);
+    if (!session) return null;
+
+    const now = Date.now();
+    if (now - session.lastActiveAt > SESSION_IDLE_TIMEOUT_MS) {
+      activeSessions.delete(tokenId);
+      return null;
+    }
+
+    session.lastActiveAt = now;
+    return session;
+  }
 
   // Hardened HTTP Security Headers against XSS, MIME-sniffing, and Clickjacking
   app.disable('x-powered-by');
@@ -298,15 +466,236 @@ async function startServer() {
   app.use(express.json({ limit: '10mb' }));
   app.use('/uploads', express.static(UPLOADS_DIR));
 
-  const requireOwner: express.RequestHandler = (req, res, next) => {
-    const ownerId = getOwnerId(req);
-    if (!ownerId) {
-      res.status(401).json({ error: 'Tidak terautentikasi. Silakan masuk terlebih dahulu.' });
+  // ============================================================================
+  // PUBLIC BRANDING & PRODUCTION AUTHENTICATION ENDPOINTS
+  // ============================================================================
+
+  app.get('/api/auth/public-branding', (req, res) => {
+    const db = loadDb();
+    const requestedOwner = getOwnerId(req);
+    const auth = ensureAdminAuthInitialized(db, requestedOwner);
+    const settings = db.app_settings[auth.ownerId] || createDefaultSettings(auth.ownerId);
+
+    let version = '1.3.0';
+    try {
+      if (fs.existsSync(VERSION_FILE)) {
+        const parsed = JSON.parse(fs.readFileSync(VERSION_FILE, 'utf-8'));
+        if (parsed?.version) version = String(parsed.version);
+      }
+    } catch {
+      // ignore
+    }
+
+    res.json({
+      app_name: settings.app_name || 'Simple Billing Mini ISP',
+      business_name: settings.business_name || 'Nusantara Net WiFi',
+      business_address: settings.business_address || '',
+      logo_url: settings.logo_url || '',
+      version,
+      isDefaultPassword: Boolean(auth.mustChangePassword),
+      defaultUsernameHint: auth.mustChangePassword ? auth.username : undefined,
+    });
+  });
+
+  app.post('/api/auth/login', (req, res) => {
+    const ip = getClientIp(req);
+    const now = Date.now();
+    const attempt = loginAttemptsByIp.get(ip);
+
+    if (attempt && attempt.lockedUntil > now) {
+      const retryAfterSeconds = Math.ceil((attempt.lockedUntil - now) / 1000);
+      res.status(429).json({
+        error: `Terlalu banyak percobaan login yang gagal. Alamat IP Anda dikunci sementara selama ${Math.ceil(
+          retryAfterSeconds / 60
+        )} menit.`,
+        code: 'BRUTE_FORCE_LOCKED',
+        retryAfterSeconds,
+      });
       return;
     }
-    (req as any).ownerId = ownerId;
+
+    const username = String(req.body?.username ?? '').trim();
+    const password = String(req.body?.password ?? '');
+
+    if (!username || !password) {
+      res.status(400).json({ error: 'Username dan password wajib diisi.' });
+      return;
+    }
+
+    const db = loadDb();
+    const auth = ensureAdminAuthInitialized(db, getOwnerId(req));
+
+    const isUsernameMatch = username.toLowerCase() === auth.username.toLowerCase();
+    const isPasswordMatch = verifyPasswordScrypt(password, auth.passwordSalt, auth.passwordHash);
+
+    if (!isUsernameMatch || !isPasswordMatch) {
+      const prevCount =
+        attempt && now - attempt.lastFailedAt < LOCKOUT_DURATION_MS ? attempt.failedCount : 0;
+      const newCount = prevCount + 1;
+
+      if (newCount >= MAX_LOGIN_ATTEMPTS) {
+        const lockedUntil = now + LOCKOUT_DURATION_MS;
+        loginAttemptsByIp.set(ip, {
+          failedCount: newCount,
+          lastFailedAt: now,
+          lockedUntil,
+        });
+        res.status(429).json({
+          error:
+            'Batas 5x percobaan gagal terlampaui. Alamat IP Anda dikunci sementara selama 15 menit demi keamanan produksi.',
+          code: 'BRUTE_FORCE_LOCKED',
+          retryAfterSeconds: Math.ceil(LOCKOUT_DURATION_MS / 1000),
+          remainingAttempts: 0,
+        });
+        return;
+      }
+
+      const remainingAttempts = MAX_LOGIN_ATTEMPTS - newCount;
+      loginAttemptsByIp.set(ip, {
+        failedCount: newCount,
+        lastFailedAt: now,
+        lockedUntil: 0,
+      });
+
+      res.status(401).json({
+        error: 'Username atau password yang Anda masukkan tidak sesuai.',
+        code: 'INVALID_CREDENTIALS',
+        remainingAttempts,
+      });
+      return;
+    }
+
+    // Reset failed login counter on success
+    loginAttemptsByIp.delete(ip);
+
+    const token = createSignedSessionToken(auth, ip);
+    res.json({
+      authenticated: true,
+      token,
+      username: auth.username,
+      ownerId: auth.ownerId,
+      mustChangePassword: Boolean(auth.mustChangePassword),
+      expiresInMs: SESSION_IDLE_TIMEOUT_MS,
+      lastPasswordChangedAt: auth.updatedAt,
+    });
+  });
+
+  app.get('/api/auth/session', (req, res) => {
+    const db = loadDb();
+    const auth = ensureAdminAuthInitialized(db, getOwnerId(req));
+    const session = verifyAndTouchSessionToken(req.headers.authorization, auth);
+
+    if (!session) {
+      res.status(401).json({
+        authenticated: false,
+        error: 'Sesi telah berakhir atau belum terautentikasi.',
+        code: 'SESSION_EXPIRED',
+      });
+      return;
+    }
+
+    res.json({
+      authenticated: true,
+      username: auth.username,
+      ownerId: auth.ownerId,
+      mustChangePassword: Boolean(auth.mustChangePassword),
+      expiresInMs: SESSION_IDLE_TIMEOUT_MS,
+      lastPasswordChangedAt: auth.updatedAt,
+    });
+  });
+
+  app.post('/api/auth/logout', (req, res) => {
+    const rawHeader = req.headers.authorization;
+    if (rawHeader && rawHeader.startsWith('Bearer ')) {
+      const tokenId = rawHeader.slice(7).trim().split('.')[0];
+      if (tokenId) activeSessions.delete(tokenId);
+    }
+    res.json({ success: true });
+  });
+
+  const requireOwner: express.RequestHandler = (req, res, next) => {
+    const db = loadDb();
+    const auth = ensureAdminAuthInitialized(db, getOwnerId(req));
+    const session = verifyAndTouchSessionToken(req.headers.authorization, auth);
+
+    if (!session) {
+      res.status(401).json({
+        error: 'Sesi Anda telah berakhir (batas 2 jam inaktivitas) atau belum login. Silakan masuk kembali.',
+        code: 'SESSION_EXPIRED',
+      });
+      return;
+    }
+
+    (req as any).ownerId = auth.ownerId;
+    (req as any).adminSession = session;
     next();
   };
+
+  app.post('/api/auth/change-credentials', requireOwner, (req, res) => {
+    const currentPassword = String(req.body?.currentPassword ?? '');
+    const newUsername = String(req.body?.newUsername ?? '').trim();
+    const newPassword = String(req.body?.newPassword ?? '');
+
+    if (!newUsername || newUsername.length < 3 || !/^[a-zA-Z0-9_.-]{3,40}$/.test(newUsername)) {
+      res.status(400).json({
+        error: 'Username baru harus 3-40 karakter alfanumerik (tanpa spasi).',
+      });
+      return;
+    }
+
+    if (!newPassword || newPassword.length < 8) {
+      res.status(400).json({
+        error: 'Demi keamanan produksi, password baru minimal harus 8 karakter.',
+      });
+      return;
+    }
+
+    if (newPassword === 'admin123') {
+      res.status(400).json({
+        error: 'Password baru tidak boleh sama dengan password default (admin123).',
+      });
+      return;
+    }
+
+    const db = loadDb();
+    const auth = ensureAdminAuthInitialized(db, (req as any).ownerId);
+
+    const isCurrentValid = verifyPasswordScrypt(
+      currentPassword,
+      auth.passwordSalt,
+      auth.passwordHash
+    );
+    if (!isCurrentValid) {
+      res.status(400).json({
+        error: 'Password saat ini yang Anda masukkan tidak sesuai.',
+      });
+      return;
+    }
+
+    const newSalt = randomBytes(16).toString('hex');
+    const newHash = hashPasswordScrypt(newPassword, newSalt);
+
+    auth.username = newUsername;
+    auth.passwordSalt = newSalt;
+    auth.passwordHash = newHash;
+    auth.mustChangePassword = false;
+    auth.sessionSecret = randomBytes(32).toString('hex');
+    auth.updatedAt = new Date().toISOString();
+    db.admin_auth = auth;
+    saveDb(db);
+
+    // Revoke all old sessions and issue a fresh token for current admin
+    activeSessions.clear();
+    const newToken = createSignedSessionToken(auth, getClientIp(req));
+
+    res.json({
+      success: true,
+      username: auth.username,
+      mustChangePassword: false,
+      token: newToken,
+      message: `Kredensial login Admin (${auth.username}) berhasil diperbarui dengan enkripsi Scrypt.`,
+    });
+  });
 
   // Bootstrap all owner data
   app.get('/api/bootstrap', requireOwner, (req, res) => {
@@ -315,7 +704,7 @@ async function startServer() {
     ensureOwnerInitialized(db, ownerId);
 
     res.json({
-      settings: db.app_settings[ownerId],
+      settings: sanitizeSettingsForClient(db.app_settings[ownerId]),
       wifi_packages: db.wifi_packages.filter((p) => p.ownerId === ownerId),
       customers: db.customers.filter((c) => c.ownerId === ownerId),
       payments: db.payments.filter((p) => p.ownerId === ownerId),
@@ -349,7 +738,7 @@ async function startServer() {
     res.json({ logo_url: logoUrl });
   });
 
-  // Update Settings (including MikroTik settings)
+  // Update Settings (including MikroTik settings with secret password masking)
   app.put('/api/settings', requireOwner, (req, res) => {
     const ownerId = (req as any).ownerId as string;
     const body = req.body;
@@ -360,6 +749,16 @@ async function startServer() {
     const db = loadDb();
     ensureOwnerInitialized(db, ownerId);
     const prev = db.app_settings[ownerId];
+
+    // If client sent the masked placeholder, preserve existing secret password in db.json
+    let resolvedMikrotikPassword = prev.mikrotik_password ?? '';
+    if (
+      body.mikrotik_password !== undefined &&
+      body.mikrotik_password !== MIKROTIK_PASSWORD_MASK
+    ) {
+      resolvedMikrotikPassword = String(body.mikrotik_password);
+    }
+
     const updated: AppSettings = {
       ownerId,
       app_name: String(body.app_name).trim(),
@@ -376,17 +775,14 @@ async function startServer() {
       mikrotik_host: String(body.mikrotik_host ?? prev.mikrotik_host ?? '').trim(),
       mikrotik_port: Number(body.mikrotik_port ?? prev.mikrotik_port ?? 8728) || 8728,
       mikrotik_user: String(body.mikrotik_user ?? prev.mikrotik_user ?? 'admin').trim(),
-      mikrotik_password:
-        body.mikrotik_password !== undefined
-          ? String(body.mikrotik_password)
-          : (prev.mikrotik_password ?? ''),
+      mikrotik_password: resolvedMikrotikPassword,
       mikrotik_protocol: body.mikrotik_protocol || prev.mikrotik_protocol || 'api',
       github_repo_url: String(body.github_repo_url ?? prev.github_repo_url ?? '').trim(),
       github_branch: String(body.github_branch ?? prev.github_branch ?? 'main').trim() || 'main',
     };
     db.app_settings[ownerId] = updated;
     saveDb(db);
-    res.json(updated);
+    res.json(sanitizeSettingsForClient(updated));
   });
 
   // Restore Full Data Backup (.XLSX)
@@ -1071,14 +1467,17 @@ async function startServer() {
   ): MikrotikConnectionConfig {
     ensureOwnerInitialized(db, ownerId);
     const s = db.app_settings[ownerId];
+    const overridePass = overrideBody?.password;
+    const resolvedPassword =
+      overridePass !== undefined && overridePass !== MIKROTIK_PASSWORD_MASK
+        ? String(overridePass)
+        : (s.mikrotik_password ?? '');
+
     return {
       host: String(overrideBody?.host ?? s.mikrotik_host ?? '').trim(),
       port: Number(overrideBody?.port ?? s.mikrotik_port ?? 8728) || 8728,
       user: String(overrideBody?.user ?? s.mikrotik_user ?? 'admin').trim(),
-      password:
-        overrideBody?.password !== undefined
-          ? String(overrideBody.password)
-          : (s.mikrotik_password ?? ''),
+      password: resolvedPassword,
       protocol: overrideBody?.protocol || s.mikrotik_protocol || 'api',
       timeoutMs: 8000,
     };
@@ -1421,9 +1820,9 @@ async function startServer() {
       if (fs.existsSync(VERSION_FILE)) {
         const parsed = JSON.parse(fs.readFileSync(VERSION_FILE, 'utf-8'));
         return {
-          version: String(parsed.version || '1.2.0'),
-          releaseDate: String(parsed.releaseDate || '2026-11-02'),
-          channel: String(parsed.channel || 'stable'),
+          version: String(parsed.version || '1.3.0'),
+          releaseDate: String(parsed.releaseDate || '2026-11-03'),
+          channel: String(parsed.channel || 'production'),
           changelog: Array.isArray(parsed.changelog) ? parsed.changelog.map(String) : [],
         };
       }
@@ -1431,9 +1830,9 @@ async function startServer() {
       // fallback
     }
     return {
-      version: '1.2.0',
-      releaseDate: '2026-11-02',
-      channel: 'stable',
+      version: '1.3.0',
+      releaseDate: '2026-11-03',
+      channel: 'production',
       changelog: [],
     };
   }

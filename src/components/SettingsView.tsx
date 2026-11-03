@@ -17,6 +17,10 @@ import {
   ShieldCheck,
   ArrowUpCircle,
   Terminal,
+  KeyRound,
+  Lock,
+  Eye,
+  EyeOff,
 } from 'lucide-react';
 import {
   AppSettings,
@@ -24,6 +28,7 @@ import {
   Customer,
   Expense,
   GitHubUpdateCheckResponse,
+  MIKROTIK_PASSWORD_MASK,
   Payment,
   WifiPackage,
 } from '../types';
@@ -33,6 +38,7 @@ import { ConfirmDialog, Modal } from './Modal';
 
 interface SettingsViewProps {
   ownerId: string;
+  adminUsername: string;
   settings: AppSettings;
   customers: Customer[];
   payments: Payment[];
@@ -53,11 +59,13 @@ interface SettingsViewProps {
     packagesCount: number;
   }>;
   onDeleteAccountData: () => Promise<void>;
+  onAdminCredentialsChanged: (newUsername: string, newToken: string) => void;
   onNotify: (msg: string, type?: 'success' | 'error') => void;
 }
 
 export function SettingsView({
   ownerId,
+  adminUsername,
   settings,
   customers,
   payments,
@@ -67,6 +75,7 @@ export function SettingsView({
   onUploadLogo,
   onRestoreBackup,
   onDeleteAccountData,
+  onAdminCredentialsChanged,
   onNotify,
 }: SettingsViewProps) {
   const [appName, setAppName] = useState(settings.app_name);
@@ -126,7 +135,62 @@ export function SettingsView({
   const [isConfirmDeleteOpen, setIsConfirmDeleteOpen] = useState(false);
   const [isDeletingAccount, setIsDeletingAccount] = useState(false);
 
+  // Admin Account Security State
+  const [newAdminUsername, setNewAdminUsername] = useState(adminUsername || 'admin');
+  const [currentAdminPassword, setCurrentAdminPassword] = useState('');
+  const [newAdminPassword, setNewAdminPassword] = useState('');
+  const [confirmAdminPassword, setConfirmAdminPassword] = useState('');
+  const [showAdminPasswords, setShowAdminPasswords] = useState(false);
+  const [isSavingCredentials, setIsSavingCredentials] = useState(false);
+
   const logoInputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (adminUsername) {
+      setNewAdminUsername(adminUsername);
+    }
+  }, [adminUsername]);
+
+  const handleSaveAdminCredentials = async () => {
+    if (!newAdminUsername.trim() || newAdminUsername.trim().length < 3) {
+      onNotify('Username Admin minimal terdiri dari 3 karakter.', 'error');
+      return;
+    }
+    if (!currentAdminPassword) {
+      onNotify('Masukkan password Admin saat ini untuk verifikasi keamanan.', 'error');
+      return;
+    }
+    if (!newAdminPassword || newAdminPassword.length < 8) {
+      onNotify('Password baru minimal harus terdiri dari 8 karakter.', 'error');
+      return;
+    }
+    if (newAdminPassword === 'admin123') {
+      onNotify('Demi keamanan produksi, password baru tidak boleh menggunakan admin123.', 'error');
+      return;
+    }
+    if (newAdminPassword !== confirmAdminPassword) {
+      onNotify('Konfirmasi password baru tidak cocok.', 'error');
+      return;
+    }
+
+    setIsSavingCredentials(true);
+    try {
+      const res = await api.changeAdminCredentials(ownerId, {
+        currentPassword: currentAdminPassword,
+        newUsername: newAdminUsername.trim(),
+        newPassword: newAdminPassword,
+      });
+      setCurrentAdminPassword('');
+      setNewAdminPassword('');
+      setConfirmAdminPassword('');
+      onAdminCredentialsChanged(res.username, res.token);
+      onNotify(res.message || 'Username dan password login Admin berhasil diperbarui.');
+    } catch (err: any) {
+      onNotify(err?.message || 'Gagal memperbarui akun login Admin.', 'error');
+    } finally {
+      setIsSavingCredentials(false);
+    }
+  };
 
   const fetchVersionStatus = useCallback(async () => {
     try {
@@ -488,7 +552,7 @@ export function SettingsView({
         {/* Logo Upload & Reference URL */}
         <div className="pt-2">
           <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-2">
-            Logo Bisnis (Untuk Cetak Invoice)
+            Logo Bisnis (Ditampilkan di Halaman Login & Cetak Invoice)
           </label>
           <div className="flex flex-col sm:flex-row sm:items-center gap-4">
             <div className="w-16 h-16 rounded-2xl bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 flex items-center justify-center overflow-hidden shrink-0">
@@ -649,14 +713,36 @@ export function SettingsView({
           </div>
 
           <div className="md:col-span-6">
-            <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
-              Password API MikroTik
-            </label>
+            <div className="flex items-center justify-between gap-2 mb-1.5">
+              <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300">
+                Password API MikroTik
+              </label>
+              {settings.has_mikrotik_password && (
+                <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-600 dark:text-emerald-400">
+                  <ShieldCheck className="w-3.5 h-3.5" />
+                  Disembunyikan dari Browser
+                </span>
+              )}
+            </div>
             <input
               type="password"
               value={mikrotikPassword}
+              onFocus={() => {
+                if (mikrotikPassword === MIKROTIK_PASSWORD_MASK) {
+                  setMikrotikPassword('');
+                }
+              }}
+              onBlur={() => {
+                if (!mikrotikPassword && settings.has_mikrotik_password) {
+                  setMikrotikPassword(MIKROTIK_PASSWORD_MASK);
+                }
+              }}
               onChange={(e) => setMikrotikPassword(e.target.value)}
-              placeholder="Masukkan password user API MikroTik"
+              placeholder={
+                settings.has_mikrotik_password
+                  ? 'Password tersimpan aman (ketik baru jika ingin mengubah)'
+                  : 'Masukkan password user API MikroTik'
+              }
               className="w-full min-h-[44px] px-3.5 py-2 text-sm font-mono bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-slate-900 dark:text-slate-100"
             />
           </div>
@@ -883,7 +969,109 @@ export function SettingsView({
         </div>
       </div>
 
-      {/* 6. Update Aplikasi & Sistem Versi via GitHub (Anti-RCE Hardened) */}
+      {/* 6. Keamanan Akun Login Admin (Produksi) */}
+      <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 sm:p-6 space-y-5">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-slate-100 dark:border-slate-800">
+          <div className="flex items-start gap-3">
+            <div className="w-10 h-10 rounded-xl bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400 flex items-center justify-center shrink-0">
+              <KeyRound className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 className="text-base font-bold text-slate-900 dark:text-slate-100">
+                  Keamanan Akun Login Admin (Produksi)
+                </h2>
+                <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-600 dark:text-emerald-400">
+                  <ShieldCheck className="w-3.5 h-3.5" />
+                  Scrypt + Brute-Force Guard + Auto-Logout 2 Jam
+                </span>
+              </div>
+              <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                Ubah username dan password login utama. Password dienkripsi dengan algoritma Scrypt dan seluruh sesi lain akan otomatis dicabut saat password diperbarui.
+              </p>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => setShowAdminPasswords((p) => !p)}
+            className="min-h-[38px] px-3 py-1.5 rounded-xl bg-slate-100 dark:bg-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-300 inline-flex items-center gap-1.5 self-start sm:self-auto"
+          >
+            {showAdminPasswords ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+            <span>{showAdminPasswords ? 'Sembunyikan Karakter' : 'Tampilkan Karakter'}</span>
+          </button>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div>
+            <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
+              Username Login Admin
+            </label>
+            <input
+              type="text"
+              value={newAdminUsername}
+              onChange={(e) => setNewAdminUsername(e.target.value)}
+              placeholder="admin"
+              className="w-full min-h-[44px] px-3.5 py-2 text-sm font-mono bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-slate-900 dark:text-slate-100"
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
+              Password Saat Ini (Verifikasi)
+            </label>
+            <input
+              type={showAdminPasswords ? 'text' : 'password'}
+              value={currentAdminPassword}
+              onChange={(e) => setCurrentAdminPassword(e.target.value)}
+              placeholder="Masukkan password Anda saat ini"
+              className="w-full min-h-[44px] px-3.5 py-2 text-sm bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-slate-900 dark:text-slate-100"
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
+              Password Baru (Minimal 8 Karakter)
+            </label>
+            <input
+              type={showAdminPasswords ? 'text' : 'password'}
+              value={newAdminPassword}
+              onChange={(e) => setNewAdminPassword(e.target.value)}
+              placeholder="Minimal 8 karakter"
+              className="w-full min-h-[44px] px-3.5 py-2 text-sm bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-slate-900 dark:text-slate-100"
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
+              Konfirmasi Password Baru
+            </label>
+            <input
+              type={showAdminPasswords ? 'text' : 'password'}
+              value={confirmAdminPassword}
+              onChange={(e) => setConfirmAdminPassword(e.target.value)}
+              placeholder="Ketik ulang password baru"
+              className="w-full min-h-[44px] px-3.5 py-2 text-sm bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-slate-900 dark:text-slate-100"
+            />
+          </div>
+        </div>
+
+        <div className="flex items-center justify-end pt-2 border-t border-slate-100 dark:border-slate-800">
+          <button
+            type="button"
+            disabled={isSavingCredentials}
+            onClick={handleSaveAdminCredentials}
+            className="min-h-[44px] px-5 py-2 text-xs sm:text-sm font-semibold text-white bg-slate-900 dark:bg-blue-600 hover:bg-slate-800 dark:hover:bg-blue-700 disabled:opacity-50 rounded-xl inline-flex items-center gap-2 transition-colors"
+          >
+            <Lock className="w-4 h-4" />
+            <span>
+              {isSavingCredentials ? 'Memperbarui Akun...' : 'Perbarui Username & Password Login'}
+            </span>
+          </button>
+        </div>
+      </div>
+
+      {/* 7. Update Aplikasi & Sistem Versi via GitHub (Anti-RCE Hardened) */}
       <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 sm:p-6 space-y-5">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-slate-100 dark:border-slate-800">
           <div className="flex items-start gap-3">
@@ -896,7 +1084,7 @@ export function SettingsView({
                   Sistem Versi & Update Aplikasi via GitHub
                 </h2>
                 <span className="font-mono tabular-nums text-xs font-bold px-2.5 py-0.5 rounded-md bg-blue-50 dark:bg-blue-950/60 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800">
-                  v{versionInfo?.version || '1.2.0'}
+                  v{versionInfo?.version || '1.3.0'}
                 </span>
                 <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-600 dark:text-emerald-400">
                   <ShieldCheck className="w-3.5 h-3.5" />
@@ -925,7 +1113,7 @@ export function SettingsView({
           <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800">
             <span className="text-slate-500 dark:text-slate-400">Versi Aplikasi Saat Ini</span>
             <p className="font-mono tabular-nums font-bold text-sm text-slate-900 dark:text-slate-100 mt-0.5">
-              v{versionInfo?.version || '1.2.0'} ({versionInfo?.releaseDate || '2026-11-02'})
+              v{versionInfo?.version || '1.3.0'} ({versionInfo?.releaseDate || '2026-11-03'})
             </p>
           </div>
           <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800">
