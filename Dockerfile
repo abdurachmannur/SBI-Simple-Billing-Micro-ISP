@@ -1,5 +1,5 @@
 # Menggunakan Node.js 22 LTS terbaru berbasis Alpine Linux yang ringan & aman
-FROM node:22-alpine
+FROM node:24-alpine
 
 # Patch seluruh paket OS Alpine untuk menutup celah CVE terbaru + install git & tzdata
 RUN apk update && \
